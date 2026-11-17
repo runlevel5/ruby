@@ -4,6 +4,7 @@
 // benefit.
 
 use std::ptr::NonNull;
+use crate::backend::current::NEW_PAGE_FILL;
 use crate::cruby::*;
 use crate::stats::zjit_alloc_bytes;
 
@@ -241,15 +242,10 @@ impl<A: Allocator> VirtualMemory<A> {
                     if !alloc.mark_writable(mapped_region_end.cast(), alloc_size_u32) {
                         return Err(FailedPageMapping);
                     }
-                    if cfg!(target_arch = "x86_64") {
-                        // Fill new memory with PUSH DS (0x1E) so that executing uninitialized memory
-                        // will fault with #UD in 64-bit mode. On Linux it becomes SIGILL and use the
-                        // usual Ruby crash reporter.
-                        std::slice::from_raw_parts_mut(mapped_region_end, alloc_size).fill(0x1E);
-                    } else if cfg!(target_arch = "aarch64") {
-                        // In aarch64, all zeros encodes UDF, so it's already what we want.
-                    } else {
-                        unreachable!("unknown arch");
+                    // Make executing uninitialized memory fault. On Linux it becomes SIGILL
+                    // and use the usual Ruby crash reporter.
+                    if let Some(byte) = NEW_PAGE_FILL {
+                        std::slice::from_raw_parts_mut(mapped_region_end, alloc_size).fill(byte);
                     }
                 }
                 self.mapped_region_bytes += alloc_size;
