@@ -3918,7 +3918,7 @@ macro_rules! c_callable {
         $vis extern "sysv64" fn $f $args $(-> $ret)? $body
     };
 }
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", all(target_arch = "powerpc64", target_endian = "little")))]
 macro_rules! c_callable {
     ($(#[$outer:meta])*
     $vis:vis fn $f:ident $args:tt $(-> $ret:ty)? $body:block) => {
