@@ -15,6 +15,8 @@ use crate::virtualmem::*;
 pub mod x86_64;
 #[cfg(target_arch = "aarch64")]
 pub mod arm64;
+#[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
+pub mod ppc64;
 
 /// Index to a label created by cb.new_label()
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
