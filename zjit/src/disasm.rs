@@ -42,6 +42,13 @@ pub fn disasm_addr_range(cb: &CodeBlock, start_addr: usize, end_addr: usize) -> 
         .detail(true)
         .build()
         .unwrap();
+    #[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
+    let mut cs = Capstone::new()
+        .ppc()
+        .mode(arch::ppc::ArchMode::Mode64)
+        .endian(capstone::Endian::Little)
+        .build()
+        .unwrap();
 
     cs.set_skipdata(true).unwrap();
 
