@@ -49,5 +49,5 @@ mod ttycolors;
 ///
 /// Only relevant for YJIT+ZJIT configurations, but building YJIT is fast, so always do it for the
 /// test binary for simplicity.
-#[cfg(test)]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 use yjit as _;
