@@ -249,6 +249,46 @@ pub fn mulhd(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// AND - and rs with rb, put the result in ra
+pub fn and(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::and(reg_no(ra), reg_no(rs), reg_no(rb), false).into();
+    cb.write_bytes(&bytes);
+}
+
+/// AND. - and rs with rb, put the result in ra, set CR0
+pub fn and_dot(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::and(reg_no(ra), reg_no(rs), reg_no(rb), true).into();
+    cb.write_bytes(&bytes);
+}
+
+/// OR - or rs with rb, put the result in ra
+pub fn or(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::or(reg_no(ra), reg_no(rs), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// MR - copy rs to ra
+pub fn mr(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd) {
+    or(cb, ra, rs, rs);
+}
+
+/// XOR - xor rs with rb, put the result in ra
+pub fn xor(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::xor(reg_no(ra), reg_no(rs), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// NOR - or rs with rb, put the complement of the result in ra
+pub fn nor(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::nor(reg_no(ra), reg_no(rs), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// NOT - put the complement of rs in ra
+pub fn not(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd) {
+    nor(cb, ra, rs, rs);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +558,54 @@ mod tests {
         let cb = compile(|cb| mulhd(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mulhd r3, r4, r5");
         assert_snapshot!(cb.hexdump(), @"9228647c");
+    }
+
+    #[test]
+    fn test_and() {
+        let cb = compile(|cb| and(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: and r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"3828837c");
+    }
+
+    #[test]
+    fn test_and_dot() {
+        let cb = compile(|cb| and_dot(cb, R0, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: and. r0, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"3928807c");
+    }
+
+    #[test]
+    fn test_or() {
+        let cb = compile(|cb| or(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: or r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"782b837c");
+    }
+
+    #[test]
+    fn test_mr() {
+        let cb = compile(|cb| mr(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mr r3, r4");
+        assert_snapshot!(cb.hexdump(), @"7823837c");
+    }
+
+    #[test]
+    fn test_xor() {
+        let cb = compile(|cb| xor(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: xor r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"782a837c");
+    }
+
+    #[test]
+    fn test_nor() {
+        let cb = compile(|cb| nor(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: nor r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"f828837c");
+    }
+
+    #[test]
+    fn test_not() {
+        let cb = compile(|cb| not(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: nor r3, r4, r4");
+        assert_snapshot!(cb.hexdump(), @"f820837c");
     }
 }
