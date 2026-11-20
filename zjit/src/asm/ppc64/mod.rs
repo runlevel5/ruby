@@ -159,6 +159,30 @@ pub fn stw(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// CMPDI - compare ra with a signed 16-bit immediate as signed 64-bit integers, set CR0
+pub fn cmpdi(cb: &mut CodeBlock, ra: PPC64Opnd, imm: PPC64Opnd) {
+    let bytes: [u8; 4] = DForm::cmpi(0, true, reg_no(ra), simm16(imm)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// CMPWI - compare ra with a signed 16-bit immediate as signed 32-bit integers, set CR0
+pub fn cmpwi(cb: &mut CodeBlock, ra: PPC64Opnd, imm: PPC64Opnd) {
+    let bytes: [u8; 4] = DForm::cmpi(0, false, reg_no(ra), simm16(imm)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// CMPLDI - compare ra with an unsigned 16-bit immediate as unsigned 64-bit integers, set CR0
+pub fn cmpldi(cb: &mut CodeBlock, ra: PPC64Opnd, imm: PPC64Opnd) {
+    let bytes: [u8; 4] = DForm::cmpli(0, true, reg_no(ra), uimm16(imm)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// CMPLWI - compare ra with an unsigned 16-bit immediate as unsigned 32-bit integers, set CR0
+pub fn cmplwi(cb: &mut CodeBlock, ra: PPC64Opnd, imm: PPC64Opnd) {
+    let bytes: [u8; 4] = DForm::cmpli(0, false, reg_no(ra), uimm16(imm)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +342,39 @@ mod tests {
         let cb = compile(|cb| stw(cb, R0, PPC64Opnd::new_mem(32, R1, 8)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stw r0, 8(r1)");
         assert_snapshot!(cb.hexdump(), @"08000190");
+    }
+
+    #[test]
+    fn test_cmpdi() {
+        let cb = compile(|cb| cmpdi(cb, R3, PPC64Opnd::new_imm(-1)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpdi r3, -1");
+        assert_snapshot!(cb.hexdump(), @"ffff232c");
+    }
+
+    #[test]
+    fn test_cmpwi() {
+        let cb = compile(|cb| cmpwi(cb, R3, PPC64Opnd::new_imm(100)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpwi r3, 0x64");
+        assert_snapshot!(cb.hexdump(), @"6400032c");
+    }
+
+    #[test]
+    fn test_cmpldi() {
+        let cb = compile(|cb| cmpldi(cb, R3, PPC64Opnd::new_uimm(0xffff)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpldi r3, 0xffff");
+        assert_snapshot!(cb.hexdump(), @"ffff2328");
+    }
+
+    #[test]
+    fn test_cmplwi() {
+        let cb = compile(|cb| cmplwi(cb, R4, PPC64Opnd::new_uimm(0)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmplwi r4, 0");
+        assert_snapshot!(cb.hexdump(), @"00000428");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected unsigned 16-bit immediate")]
+    fn test_cmpldi_negative_imm() {
+        compile(|cb| cmpldi(cb, R3, PPC64Opnd::new_imm(-1)));
     }
 }
