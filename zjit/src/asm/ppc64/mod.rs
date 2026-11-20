@@ -219,6 +219,36 @@ pub fn stdu(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// ADD - add ra and rb, put the result in rt
+pub fn add(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::add(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SUBF - subtract ra from rb, put the result in rt
+pub fn subf(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::subf(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// NEG - negate ra, put the result in rt
+pub fn neg(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::neg(reg_no(rt), reg_no(ra)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// MULLD - multiply ra and rb, put the low 64 bits of the result in rt
+pub fn mulld(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::mulld(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// MULHD - multiply ra and rb as signed integers, put the high 64 bits of the result in rt
+pub fn mulhd(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::mulhd(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +483,40 @@ mod tests {
         let cb = compile(|cb| stdu(cb, R1, PPC64Opnd::new_mem(64, R1, -112)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stdu r1, -0x70(r1)");
         assert_snapshot!(cb.hexdump(), @"91ff21f8");
+    }
+
+    #[test]
+    fn test_add() {
+        let cb = compile(|cb| add(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: add r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"142a647c");
+    }
+
+    #[test]
+    fn test_subf() {
+        let cb = compile(|cb| subf(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: subf r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"5028647c");
+    }
+
+    #[test]
+    fn test_neg() {
+        let cb = compile(|cb| neg(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: neg r3, r4");
+        assert_snapshot!(cb.hexdump(), @"d000647c");
+    }
+
+    #[test]
+    fn test_mulld() {
+        let cb = compile(|cb| mulld(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mulld r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"d229647c");
+    }
+
+    #[test]
+    fn test_mulhd() {
+        let cb = compile(|cb| mulhd(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mulhd r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"9228647c");
     }
 }

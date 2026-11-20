@@ -3,6 +3,8 @@
 
 mod d_form;
 mod ds_form;
+mod xo_form;
 
 pub use d_form::DForm;
 pub use ds_form::DSForm;
+pub use xo_form::XOForm;
