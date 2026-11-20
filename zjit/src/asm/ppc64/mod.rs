@@ -78,6 +78,87 @@ pub fn oris(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, imm: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// Unwrap a memory operand into its base register number and a displacement
+/// that fits in a signed 16-bit field.
+fn mem_d(opnd: PPC64Opnd) -> (u8, i16) {
+    match opnd {
+        PPC64Opnd::Mem(mem) => {
+            assert!(mem.base_reg_no != 0, "r0 reads as zero when used as a base register");
+            let disp = i16::try_from(mem.disp)
+                .unwrap_or_else(|_| panic!("Expected signed 16-bit displacement, got {}", mem.disp));
+            (mem.base_reg_no, disp)
+        }
+        _ => panic!("Expected memory operand, got {opnd:?}"),
+    }
+}
+
+/// ANDI. - and rs with an unsigned 16-bit immediate, put the result in ra, set CR0
+pub fn andi_dot(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, imm: PPC64Opnd) {
+    let bytes: [u8; 4] = DForm::andi_dot(reg_no(ra), reg_no(rs), uimm16(imm)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// XORI - xor rs with an unsigned 16-bit immediate, put the result in ra
+pub fn xori(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, imm: PPC64Opnd) {
+    let bytes: [u8; 4] = DForm::xori(reg_no(ra), reg_no(rs), uimm16(imm)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// NOP - do nothing
+pub fn nop(cb: &mut CodeBlock) {
+    let bytes: [u8; 4] = DForm::ori(0, 0, 0).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LBZ - load a byte from memory into rt, zero-extended
+pub fn lbz(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_d(mem);
+    let bytes: [u8; 4] = DForm::lbz(reg_no(rt), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LHZ - load a halfword from memory into rt, zero-extended
+pub fn lhz(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_d(mem);
+    let bytes: [u8; 4] = DForm::lhz(reg_no(rt), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LHA - load a halfword from memory into rt, sign-extended
+pub fn lha(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_d(mem);
+    let bytes: [u8; 4] = DForm::lha(reg_no(rt), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LWZ - load a word from memory into rt, zero-extended
+pub fn lwz(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_d(mem);
+    let bytes: [u8; 4] = DForm::lwz(reg_no(rt), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STB - store the low byte of rs into memory
+pub fn stb(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_d(mem);
+    let bytes: [u8; 4] = DForm::stb(reg_no(rs), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STH - store the low halfword of rs into memory
+pub fn sth(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_d(mem);
+    let bytes: [u8; 4] = DForm::sth(reg_no(rs), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STW - store the low word of rs into memory
+pub fn stw(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_d(mem);
+    let bytes: [u8; 4] = DForm::stw(reg_no(rs), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +236,87 @@ mod tests {
         let cb = compile(|cb| oris(cb, R12, R11, PPC64Opnd::new_uimm(0x1234)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: oris r12, r11, 0x1234");
         assert_snapshot!(cb.hexdump(), @"34126c65");
+    }
+
+    #[test]
+    fn test_andi_dot() {
+        let cb = compile(|cb| andi_dot(cb, R3, R4, PPC64Opnd::new_uimm(0xff)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: andi. r3, r4, 0xff");
+        assert_snapshot!(cb.hexdump(), @"ff008370");
+    }
+
+    #[test]
+    fn test_xori() {
+        let cb = compile(|cb| xori(cb, R3, R4, PPC64Opnd::new_uimm(1)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: xori r3, r4, 1");
+        assert_snapshot!(cb.hexdump(), @"01008368");
+    }
+
+    #[test]
+    fn test_nop() {
+        let cb = compile(nop);
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: nop");
+        assert_snapshot!(cb.hexdump(), @"00000060");
+    }
+
+    #[test]
+    fn test_lbz() {
+        let cb = compile(|cb| lbz(cb, R3, PPC64Opnd::new_mem(8, R4, 8)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lbz r3, 8(r4)");
+        assert_snapshot!(cb.hexdump(), @"08006488");
+    }
+
+    #[test]
+    fn test_lhz() {
+        let cb = compile(|cb| lhz(cb, R3, PPC64Opnd::new_mem(16, R4, -2)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhz r3, -2(r4)");
+        assert_snapshot!(cb.hexdump(), @"feff64a0");
+    }
+
+    #[test]
+    fn test_lha() {
+        let cb = compile(|cb| lha(cb, R3, PPC64Opnd::new_mem(16, R4, 2)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lha r3, 2(r4)");
+        assert_snapshot!(cb.hexdump(), @"020064a8");
+    }
+
+    #[test]
+    fn test_lwz() {
+        let cb = compile(|cb| lwz(cb, R3, PPC64Opnd::new_mem(32, R1, 0x7ffc)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwz r3, 0x7ffc(r1)");
+        assert_snapshot!(cb.hexdump(), @"fc7f6180");
+    }
+
+    #[test]
+    #[should_panic(expected = "r0 reads as zero when used as a base register")]
+    fn test_load_r0_base() {
+        compile(|cb| lwz(cb, R3, PPC64Opnd::new_mem(32, R0, 0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected signed 16-bit displacement")]
+    fn test_load_disp_too_large() {
+        compile(|cb| lwz(cb, R3, PPC64Opnd::new_mem(32, R1, 0x8000)));
+    }
+
+    #[test]
+    fn test_stb() {
+        let cb = compile(|cb| stb(cb, R3, PPC64Opnd::new_mem(8, R4, 1)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: stb r3, 1(r4)");
+        assert_snapshot!(cb.hexdump(), @"01006498");
+    }
+
+    #[test]
+    fn test_sth() {
+        let cb = compile(|cb| sth(cb, R5, PPC64Opnd::new_mem(16, R31, -32768)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sth r5, -0x8000(r31)");
+        assert_snapshot!(cb.hexdump(), @"0080bfb0");
+    }
+
+    #[test]
+    fn test_stw() {
+        let cb = compile(|cb| stw(cb, R0, PPC64Opnd::new_mem(32, R1, 8)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: stw r0, 8(r1)");
+        assert_snapshot!(cb.hexdump(), @"08000190");
     }
 }
