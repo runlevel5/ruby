@@ -183,6 +183,42 @@ pub fn cmplwi(cb: &mut CodeBlock, ra: PPC64Opnd, imm: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// Unwrap a memory operand like [`mem_d`], for instructions that also need
+/// the displacement to be a multiple of 4.
+fn mem_ds(opnd: PPC64Opnd) -> (u8, i16) {
+    let (ra, disp) = mem_d(opnd);
+    assert!(disp % 4 == 0, "Expected displacement to be a multiple of 4, got {disp}");
+    (ra, disp)
+}
+
+/// LD - load a doubleword from memory into rt
+pub fn ld(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_ds(mem);
+    let bytes: [u8; 4] = DSForm::ld(reg_no(rt), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LWA - load a word from memory into rt, sign-extended
+pub fn lwa(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_ds(mem);
+    let bytes: [u8; 4] = DSForm::lwa(reg_no(rt), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STD - store rs into memory
+pub fn std(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_ds(mem);
+    let bytes: [u8; 4] = DSForm::std(reg_no(rs), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STDU - store rs into memory, then move the base register to the address stored to
+pub fn stdu(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
+    let (ra, disp) = mem_ds(mem);
+    let bytes: [u8; 4] = DSForm::stdu(reg_no(rs), ra, disp).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +412,46 @@ mod tests {
     #[should_panic(expected = "Expected unsigned 16-bit immediate")]
     fn test_cmpldi_negative_imm() {
         compile(|cb| cmpldi(cb, R3, PPC64Opnd::new_imm(-1)));
+    }
+
+    #[test]
+    fn test_ld() {
+        let cb = compile(|cb| ld(cb, R3, PPC64Opnd::new_mem(64, R4, 8)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: ld r3, 8(r4)");
+        assert_snapshot!(cb.hexdump(), @"080064e8");
+    }
+
+    #[test]
+    fn test_ld_negative_disp() {
+        let cb = compile(|cb| ld(cb, R3, PPC64Opnd::new_mem(64, R1, -8)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: ld r3, -8(r1)");
+        assert_snapshot!(cb.hexdump(), @"f8ff61e8");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected displacement to be a multiple of 4")]
+    fn test_ld_unaligned_disp() {
+        compile(|cb| ld(cb, R3, PPC64Opnd::new_mem(64, R4, 6)));
+    }
+
+    #[test]
+    fn test_lwa() {
+        let cb = compile(|cb| lwa(cb, R3, PPC64Opnd::new_mem(32, R4, 4)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwa r3, 4(r4)");
+        assert_snapshot!(cb.hexdump(), @"060064e8");
+    }
+
+    #[test]
+    fn test_std() {
+        let cb = compile(|cb| std(cb, R0, PPC64Opnd::new_mem(64, R1, 16)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: std r0, 0x10(r1)");
+        assert_snapshot!(cb.hexdump(), @"100001f8");
+    }
+
+    #[test]
+    fn test_stdu() {
+        let cb = compile(|cb| stdu(cb, R1, PPC64Opnd::new_mem(64, R1, -112)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: stdu r1, -0x70(r1)");
+        assert_snapshot!(cb.hexdump(), @"91ff21f8");
     }
 }
