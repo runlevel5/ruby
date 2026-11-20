@@ -2,7 +2,7 @@
 ///
 /// +------+-------+-------+----------------+
 /// | 0  5 | 6  10 | 11 15 | 16          31 |
-/// | opcd | rt/rs | ra    | si/ui          |
+/// | opcd | rt/rs | ra    | si/ui/d        |
 /// +------+-------+-------+----------------+
 ///
 /// Bits are numbered as in the Power ISA, where bit 0 is the most significant.
@@ -13,7 +13,7 @@ pub struct DForm {
     /// The number of the target register, or of the source register for logical instructions.
     rt: u8,
 
-    /// The number of the other register. As the base of addi and addis, 0 means the value zero.
+    /// The number of the other register. As the base of addi, addis, loads and stores, 0 means the value zero.
     ra: u8,
 
     /// The 16-bit immediate. Whether it is sign-extended depends on the instruction.
@@ -43,6 +43,60 @@ impl DForm {
     /// Power ISA 2.07B, Book I, Fixed-Point Logical Instructions
     pub fn oris(ra: u8, rs: u8, ui: u16) -> Self {
         Self { opcd: 25, rt: rs, ra, imm: ui }
+    }
+
+    /// ANDI.: ra = rs & zero-extended ui, and set CR0 by comparing the result with zero
+    /// Power ISA 2.07B, Book I, Fixed-Point Logical Instructions
+    pub fn andi_dot(ra: u8, rs: u8, ui: u16) -> Self {
+        Self { opcd: 28, rt: rs, ra, imm: ui }
+    }
+
+    /// XORI: ra = rs ^ zero-extended ui
+    /// Power ISA 2.07B, Book I, Fixed-Point Logical Instructions
+    pub fn xori(ra: u8, rs: u8, ui: u16) -> Self {
+        Self { opcd: 26, rt: rs, ra, imm: ui }
+    }
+
+    /// LBZ: rt = zero-extended byte at (ra|0) + sign-extended d
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lbz(rt: u8, ra: u8, d: i16) -> Self {
+        Self { opcd: 34, rt, ra, imm: d as u16 }
+    }
+
+    /// LHZ: rt = zero-extended halfword at (ra|0) + sign-extended d
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lhz(rt: u8, ra: u8, d: i16) -> Self {
+        Self { opcd: 40, rt, ra, imm: d as u16 }
+    }
+
+    /// LHA: rt = sign-extended halfword at (ra|0) + sign-extended d
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lha(rt: u8, ra: u8, d: i16) -> Self {
+        Self { opcd: 42, rt, ra, imm: d as u16 }
+    }
+
+    /// LWZ: rt = zero-extended word at (ra|0) + sign-extended d
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lwz(rt: u8, ra: u8, d: i16) -> Self {
+        Self { opcd: 32, rt, ra, imm: d as u16 }
+    }
+
+    /// STB: store the low byte of rs at (ra|0) + sign-extended d
+    /// Power ISA 2.07B, Book I, Fixed-Point Store Instructions
+    pub fn stb(rs: u8, ra: u8, d: i16) -> Self {
+        Self { opcd: 38, rt: rs, ra, imm: d as u16 }
+    }
+
+    /// STH: store the low halfword of rs at (ra|0) + sign-extended d
+    /// Power ISA 2.07B, Book I, Fixed-Point Store Instructions
+    pub fn sth(rs: u8, ra: u8, d: i16) -> Self {
+        Self { opcd: 44, rt: rs, ra, imm: d as u16 }
+    }
+
+    /// STW: store the low word of rs at (ra|0) + sign-extended d
+    /// Power ISA 2.07B, Book I, Fixed-Point Store Instructions
+    pub fn stw(rs: u8, ra: u8, d: i16) -> Self {
+        Self { opcd: 36, rt: rs, ra, imm: d as u16 }
     }
 }
 
@@ -99,5 +153,59 @@ mod tests {
     fn test_oris() {
         let result: u32 = DForm::oris(12, 11, 0x1234).into();
         assert_eq!(0x656c1234, result);
+    }
+
+    #[test]
+    fn test_andi_dot() {
+        let result: u32 = DForm::andi_dot(3, 4, 0xff).into();
+        assert_eq!(0x708300ff, result);
+    }
+
+    #[test]
+    fn test_xori() {
+        let result: u32 = DForm::xori(3, 4, 1).into();
+        assert_eq!(0x68830001, result);
+    }
+
+    #[test]
+    fn test_lbz() {
+        let result: u32 = DForm::lbz(3, 4, 8).into();
+        assert_eq!(0x88640008, result);
+    }
+
+    #[test]
+    fn test_lhz() {
+        let result: u32 = DForm::lhz(3, 4, -2).into();
+        assert_eq!(0xa064fffe, result);
+    }
+
+    #[test]
+    fn test_lha() {
+        let result: u32 = DForm::lha(3, 4, 2).into();
+        assert_eq!(0xa8640002, result);
+    }
+
+    #[test]
+    fn test_lwz() {
+        let result: u32 = DForm::lwz(3, 1, 0x7ffc).into();
+        assert_eq!(0x80617ffc, result);
+    }
+
+    #[test]
+    fn test_stb() {
+        let result: u32 = DForm::stb(3, 4, 1).into();
+        assert_eq!(0x98640001, result);
+    }
+
+    #[test]
+    fn test_sth() {
+        let result: u32 = DForm::sth(5, 31, -32768).into();
+        assert_eq!(0xb0bf8000, result);
+    }
+
+    #[test]
+    fn test_stw() {
+        let result: u32 = DForm::stw(0, 1, 8).into();
+        assert_eq!(0x90010008, result);
     }
 }
