@@ -98,6 +98,23 @@ impl DForm {
     pub fn stw(rs: u8, ra: u8, d: i16) -> Self {
         Self { opcd: 36, rt: rs, ra, imm: d as u16 }
     }
+
+    /// CMPI: compare ra with sign-extended si as signed integers, set CR field bf.
+    /// Compares all 64 bits of ra when l is true and its low 32 bits otherwise.
+    /// The bits where rt usually goes hold bf, a reserved bit, and l.
+    /// Power ISA 2.07B, Book I, Fixed-Point Compare Instructions
+    pub fn cmpi(bf: u8, l: bool, ra: u8, si: i16) -> Self {
+        assert!(bf < 8);
+        Self { opcd: 11, rt: (bf << 2) | (l as u8), ra, imm: si as u16 }
+    }
+
+    /// CMPLI: compare ra with zero-extended ui as unsigned integers, set CR field bf.
+    /// Compares all 64 bits of ra when l is true and its low 32 bits otherwise.
+    /// Power ISA 2.07B, Book I, Fixed-Point Compare Instructions
+    pub fn cmpli(bf: u8, l: bool, ra: u8, ui: u16) -> Self {
+        assert!(bf < 8);
+        Self { opcd: 10, rt: (bf << 2) | (l as u8), ra, imm: ui }
+    }
 }
 
 impl From<DForm> for u32 {
@@ -207,5 +224,35 @@ mod tests {
     fn test_stw() {
         let result: u32 = DForm::stw(0, 1, 8).into();
         assert_eq!(0x90010008, result);
+    }
+
+    #[test]
+    fn test_cmpi() {
+        let result: u32 = DForm::cmpi(0, true, 3, -1).into();
+        assert_eq!(0x2c23ffff, result);
+    }
+
+    #[test]
+    fn test_cmpi_32_bits() {
+        let result: u32 = DForm::cmpi(0, false, 3, 100).into();
+        assert_eq!(0x2c030064, result);
+    }
+
+    #[test]
+    fn test_cmpi_cr7() {
+        let result: u32 = DForm::cmpi(7, true, 3, 0).into();
+        assert_eq!(0x2fa30000, result);
+    }
+
+    #[test]
+    fn test_cmpli() {
+        let result: u32 = DForm::cmpli(0, true, 3, 0xffff).into();
+        assert_eq!(0x2823ffff, result);
+    }
+
+    #[test]
+    fn test_cmpli_32_bits() {
+        let result: u32 = DForm::cmpli(0, false, 4, 0).into();
+        assert_eq!(0x28040000, result);
     }
 }
