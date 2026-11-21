@@ -552,6 +552,15 @@ pub fn mtctr(cb: &mut CodeBlock, rs: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// ISEL - put truthy in rt if CR0 meets the condition, and falsy otherwise
+pub fn isel(cb: &mut CodeBlock, rt: PPC64Opnd, truthy: PPC64Opnd, falsy: PPC64Opnd, cond: Condition) {
+    // The instruction only picks its first operand when a CR bit is set
+    let (ra, rb) = if cond.expects_set() { (truthy, falsy) } else { (falsy, truthy) };
+    assert!(ra != R0, "isel reads r0 as zero in its first operand");
+    let bytes: [u8; 4] = AForm::isel(reg_no(rt), reg_no(ra), reg_no(rb), cond.bi).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1248,5 +1257,52 @@ mod tests {
         let cb = compile(|cb| mtctr(cb, R12));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtctr r12");
         assert_snapshot!(cb.hexdump(), @"a603897d");
+    }
+
+    #[test]
+    fn test_isel_eq() {
+        let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::EQ));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r4, r5, cr0eq");
+        assert_snapshot!(cb.hexdump(), @"9e28647c");
+    }
+
+    #[test]
+    fn test_isel_ne() {
+        let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::NE));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r5, r4, cr0eq");
+        assert_snapshot!(cb.hexdump(), @"9e20657c");
+    }
+
+    #[test]
+    fn test_isel_lt() {
+        let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::LT));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r4, r5, cr0lt");
+        assert_snapshot!(cb.hexdump(), @"1e28647c");
+    }
+
+    #[test]
+    fn test_isel_le() {
+        let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::LE));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r5, r4, cr0gt");
+        assert_snapshot!(cb.hexdump(), @"5e20657c");
+    }
+
+    #[test]
+    fn test_isel_r0_falsy() {
+        let cb = compile(|cb| isel(cb, R3, R4, R0, Condition::EQ));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r4, r0, cr0eq");
+        assert_snapshot!(cb.hexdump(), @"9e00647c");
+    }
+
+    #[test]
+    #[should_panic(expected = "isel reads r0 as zero in its first operand")]
+    fn test_isel_r0_truthy() {
+        compile(|cb| isel(cb, R3, R0, R5, Condition::EQ));
+    }
+
+    #[test]
+    #[should_panic(expected = "isel reads r0 as zero in its first operand")]
+    fn test_isel_r0_falsy_inverted() {
+        compile(|cb| isel(cb, R3, R4, R0, Condition::NE));
     }
 }
