@@ -11,6 +11,7 @@ pub struct XForm {
     rt: u8,
 
     /// The number of the first operand register, or of the target register for logical instructions.
+    /// As the base of loads and stores, 0 means the value zero.
     ra: u8,
 
     /// The number of the second operand register.
@@ -63,6 +64,42 @@ impl XForm {
     pub fn cmpl(bf: u8, l: bool, ra: u8, rb: u8) -> Self {
         assert!(bf < 8);
         Self { rt: (bf << 2) | (l as u8), ra, rb, xo: 32, rc: false }
+    }
+
+    /// LDX: rt = doubleword at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn ldx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 21, rc: false }
+    }
+
+    /// LBZX: rt = zero-extended byte at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lbzx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 87, rc: false }
+    }
+
+    /// LHZX: rt = zero-extended halfword at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lhzx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 279, rc: false }
+    }
+
+    /// LHAX: rt = sign-extended halfword at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lhax(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 343, rc: false }
+    }
+
+    /// LWZX: rt = zero-extended word at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lwzx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 23, rc: false }
+    }
+
+    /// LWAX: rt = sign-extended word at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load Instructions
+    pub fn lwax(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 341, rc: false }
     }
 }
 
@@ -145,5 +182,41 @@ mod tests {
     fn test_cmpl_32_bits() {
         let result: u32 = XForm::cmpl(0, false, 3, 4).into();
         assert_eq!(0x7c032040, result);
+    }
+
+    #[test]
+    fn test_ldx() {
+        let result: u32 = XForm::ldx(3, 4, 5).into();
+        assert_eq!(0x7c64282a, result);
+    }
+
+    #[test]
+    fn test_lbzx() {
+        let result: u32 = XForm::lbzx(3, 4, 5).into();
+        assert_eq!(0x7c6428ae, result);
+    }
+
+    #[test]
+    fn test_lhzx() {
+        let result: u32 = XForm::lhzx(3, 4, 5).into();
+        assert_eq!(0x7c642a2e, result);
+    }
+
+    #[test]
+    fn test_lhax() {
+        let result: u32 = XForm::lhax(3, 4, 5).into();
+        assert_eq!(0x7c642aae, result);
+    }
+
+    #[test]
+    fn test_lwzx() {
+        let result: u32 = XForm::lwzx(3, 4, 5).into();
+        assert_eq!(0x7c64282e, result);
+    }
+
+    #[test]
+    fn test_lwax() {
+        let result: u32 = XForm::lwax(3, 4, 5).into();
+        assert_eq!(0x7c642aaa, result);
     }
 }

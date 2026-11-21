@@ -313,6 +313,48 @@ pub fn cmplw(cb: &mut CodeBlock, ra: PPC64Opnd, rb: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// Unwrap the number of a register operand used as the base of an indexed load or store.
+fn base_reg_no(opnd: PPC64Opnd) -> u8 {
+    assert!(opnd != R0, "r0 reads as zero when used as a base register");
+    reg_no(opnd)
+}
+
+/// LDX - load a doubleword from memory at ra + rb into rt
+pub fn ldx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::ldx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LBZX - load a byte from memory at ra + rb into rt, zero-extended
+pub fn lbzx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::lbzx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LHZX - load a halfword from memory at ra + rb into rt, zero-extended
+pub fn lhzx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::lhzx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LHAX - load a halfword from memory at ra + rb into rt, sign-extended
+pub fn lhax(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::lhax(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LWZX - load a word from memory at ra + rb into rt, zero-extended
+pub fn lwzx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::lwzx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LWAX - load a word from memory at ra + rb into rt, sign-extended
+pub fn lwax(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::lwax(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,5 +701,53 @@ mod tests {
         let cb = compile(|cb| cmplw(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmplw r3, r4");
         assert_snapshot!(cb.hexdump(), @"4020037c");
+    }
+
+    #[test]
+    fn test_ldx() {
+        let cb = compile(|cb| ldx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: ldx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2a28647c");
+    }
+
+    #[test]
+    fn test_lbzx() {
+        let cb = compile(|cb| lbzx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lbzx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"ae28647c");
+    }
+
+    #[test]
+    fn test_lhzx() {
+        let cb = compile(|cb| lhzx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhzx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2e2a647c");
+    }
+
+    #[test]
+    fn test_lhax() {
+        let cb = compile(|cb| lhax(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhax r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"ae2a647c");
+    }
+
+    #[test]
+    fn test_lwzx() {
+        let cb = compile(|cb| lwzx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwzx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2e28647c");
+    }
+
+    #[test]
+    fn test_lwax() {
+        let cb = compile(|cb| lwax(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwax r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"aa2a647c");
+    }
+
+    #[test]
+    #[should_panic(expected = "r0 reads as zero when used as a base register")]
+    fn test_ldx_r0_base() {
+        compile(|cb| ldx(cb, R3, R0, R5));
     }
 }
