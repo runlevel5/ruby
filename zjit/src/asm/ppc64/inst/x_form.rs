@@ -101,6 +101,30 @@ impl XForm {
     pub fn lwax(rt: u8, ra: u8, rb: u8) -> Self {
         Self { rt, ra, rb, xo: 341, rc: false }
     }
+
+    /// STDX: store rs at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Store Instructions
+    pub fn stdx(rs: u8, ra: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 149, rc: false }
+    }
+
+    /// STBX: store the low byte of rs at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Store Instructions
+    pub fn stbx(rs: u8, ra: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 215, rc: false }
+    }
+
+    /// STHX: store the low halfword of rs at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Store Instructions
+    pub fn sthx(rs: u8, ra: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 407, rc: false }
+    }
+
+    /// STWX: store the low word of rs at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Store Instructions
+    pub fn stwx(rs: u8, ra: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 151, rc: false }
+    }
 }
 
 impl From<XForm> for u32 {
@@ -218,5 +242,29 @@ mod tests {
     fn test_lwax() {
         let result: u32 = XForm::lwax(3, 4, 5).into();
         assert_eq!(0x7c642aaa, result);
+    }
+
+    #[test]
+    fn test_stdx() {
+        let result: u32 = XForm::stdx(3, 4, 5).into();
+        assert_eq!(0x7c64292a, result);
+    }
+
+    #[test]
+    fn test_stbx() {
+        let result: u32 = XForm::stbx(3, 4, 5).into();
+        assert_eq!(0x7c6429ae, result);
+    }
+
+    #[test]
+    fn test_sthx() {
+        let result: u32 = XForm::sthx(3, 4, 5).into();
+        assert_eq!(0x7c642b2e, result);
+    }
+
+    #[test]
+    fn test_stwx() {
+        let result: u32 = XForm::stwx(3, 4, 5).into();
+        assert_eq!(0x7c64292e, result);
     }
 }
