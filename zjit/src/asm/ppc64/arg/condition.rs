@@ -31,4 +31,24 @@ impl Condition {
     pub fn expects_set(&self) -> bool {
         self.bo == Self::TRUE
     }
+
+    /// The condition that is met exactly when this one is not
+    pub fn inverse(&self) -> Self {
+        let bo = if self.expects_set() { Self::FALSE } else { Self::TRUE };
+        Self { bo, bi: self.bi }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inverse() {
+        assert_eq!(Condition::GE, Condition::LT.inverse());
+        assert_eq!(Condition::LE, Condition::GT.inverse());
+        assert_eq!(Condition::NE, Condition::EQ.inverse());
+        assert_eq!(Condition::NS, Condition::SO.inverse());
+        assert_eq!(Condition::SO, Condition::NS.inverse());
+    }
 }
