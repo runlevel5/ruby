@@ -3,6 +3,7 @@
 
 use crate::asm::CodeBlock;
 
+mod arg;
 mod inst;
 mod opnd;
 
@@ -10,6 +11,7 @@ use inst::*;
 
 // We're going to make these public to make using these things easier in the
 // backend (so they don't have to have knowledge about the submodule).
+pub use arg::*;
 pub use opnd::*;
 
 /// Unwrap the number of a register operand.
@@ -488,6 +490,11 @@ pub const fn b_offset_fits(offset: i64) -> bool {
     offset_fits_bits(offset, IForm::OFFSET_BITS)
 }
 
+/// Whether bc can reach a target that is this many bytes away
+pub const fn bc_offset_fits(offset: i64) -> bool {
+    offset_fits_bits(offset, BForm::OFFSET_BITS)
+}
+
 /// B - branch to the instruction that is offset bytes away from this one
 pub fn b(cb: &mut CodeBlock, offset: i64) {
     assert!(b_offset_fits(offset), "The offset must be a multiple of 4 that fits in 26 bits, got {offset}");
@@ -499,6 +506,13 @@ pub fn b(cb: &mut CodeBlock, offset: i64) {
 pub fn bl(cb: &mut CodeBlock, offset: i64) {
     assert!(b_offset_fits(offset), "The offset must be a multiple of 4 that fits in 26 bits, got {offset}");
     let bytes: [u8; 4] = IForm::bl(offset as i32).into();
+    cb.write_bytes(&bytes);
+}
+
+/// BC - branch to the instruction that is offset bytes away from this one if CR0 meets the condition
+pub fn bc(cb: &mut CodeBlock, cond: Condition, offset: i64) {
+    assert!(bc_offset_fits(offset), "The offset must be a multiple of 4 that fits in 16 bits, got {offset}");
+    let bytes: [u8; 4] = BForm::bc(cond.bo, cond.bi, offset as i16).into();
     cb.write_bytes(&bytes);
 }
 
@@ -1061,6 +1075,15 @@ mod tests {
     }
 
     #[test]
+    fn test_bc_offset_fits() {
+        assert!(bc_offset_fits(0x7ffc));
+        assert!(bc_offset_fits(-0x8000));
+        assert!(!bc_offset_fits(0x8000));
+        assert!(!bc_offset_fits(-0x8004));
+        assert!(!bc_offset_fits(2));
+    }
+
+    #[test]
     fn test_b() {
         let cb = compile(|cb| b(cb, 256));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: b 0x100");
@@ -1082,8 +1105,70 @@ mod tests {
     }
 
     #[test]
+    fn test_bc_eq() {
+        let cb = compile(|cb| bc(cb, Condition::EQ, 8));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: beq 8");
+        assert_snapshot!(cb.hexdump(), @"08008241");
+    }
+
+    #[test]
+    fn test_bc_ne_backward() {
+        let cb = compile(|cb| bc(cb, Condition::NE, -8));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bne 0xfffffffffffffff8");
+        assert_snapshot!(cb.hexdump(), @"f8ff8240");
+    }
+
+    #[test]
+    fn test_bc_lt() {
+        let cb = compile(|cb| bc(cb, Condition::LT, 32764));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: blt 0x7ffc");
+        assert_snapshot!(cb.hexdump(), @"fc7f8041");
+    }
+
+    #[test]
+    fn test_bc_ge() {
+        let cb = compile(|cb| bc(cb, Condition::GE, -32768));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bge 0xffffffffffff8000");
+        assert_snapshot!(cb.hexdump(), @"00808040");
+    }
+
+    #[test]
+    fn test_bc_gt() {
+        let cb = compile(|cb| bc(cb, Condition::GT, 8));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bgt 8");
+        assert_snapshot!(cb.hexdump(), @"08008141");
+    }
+
+    #[test]
+    fn test_bc_le() {
+        let cb = compile(|cb| bc(cb, Condition::LE, 8));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: ble 8");
+        assert_snapshot!(cb.hexdump(), @"08008140");
+    }
+
+    #[test]
+    fn test_bc_so() {
+        let cb = compile(|cb| bc(cb, Condition::SO, 8));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bso 8");
+        assert_snapshot!(cb.hexdump(), @"08008341");
+    }
+
+    #[test]
+    fn test_bc_ns() {
+        let cb = compile(|cb| bc(cb, Condition::NS, 8));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bns 8");
+        assert_snapshot!(cb.hexdump(), @"08008340");
+    }
+
+    #[test]
     #[should_panic(expected = "The offset must be a multiple of 4 that fits in 26 bits")]
     fn test_b_too_far() {
         compile(|cb| b(cb, 0x2000000));
+    }
+
+    #[test]
+    #[should_panic(expected = "The offset must be a multiple of 4 that fits in 16 bits")]
+    fn test_bc_too_far() {
+        compile(|cb| bc(cb, Condition::EQ, 0x8000));
     }
 }
