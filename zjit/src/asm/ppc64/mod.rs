@@ -289,6 +289,30 @@ pub fn not(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd) {
     nor(cb, ra, rs, rs);
 }
 
+/// CMPD - compare ra with rb as signed 64-bit integers, set CR0
+pub fn cmpd(cb: &mut CodeBlock, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::cmp(0, true, reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// CMPW - compare ra with rb as signed 32-bit integers, set CR0
+pub fn cmpw(cb: &mut CodeBlock, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::cmp(0, false, reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// CMPLD - compare ra with rb as unsigned 64-bit integers, set CR0
+pub fn cmpld(cb: &mut CodeBlock, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::cmpl(0, true, reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// CMPLW - compare ra with rb as unsigned 32-bit integers, set CR0
+pub fn cmplw(cb: &mut CodeBlock, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::cmpl(0, false, reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +631,33 @@ mod tests {
         let cb = compile(|cb| not(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: nor r3, r4, r4");
         assert_snapshot!(cb.hexdump(), @"f820837c");
+    }
+
+    #[test]
+    fn test_cmpd() {
+        let cb = compile(|cb| cmpd(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpd r3, r4");
+        assert_snapshot!(cb.hexdump(), @"0020237c");
+    }
+
+    #[test]
+    fn test_cmpw() {
+        let cb = compile(|cb| cmpw(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpw r3, r4");
+        assert_snapshot!(cb.hexdump(), @"0020037c");
+    }
+
+    #[test]
+    fn test_cmpld() {
+        let cb = compile(|cb| cmpld(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpld r3, r4");
+        assert_snapshot!(cb.hexdump(), @"4020237c");
+    }
+
+    #[test]
+    fn test_cmplw() {
+        let cb = compile(|cb| cmplw(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmplw r3, r4");
+        assert_snapshot!(cb.hexdump(), @"4020037c");
     }
 }

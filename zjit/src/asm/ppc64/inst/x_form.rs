@@ -47,6 +47,23 @@ impl XForm {
     pub fn nor(ra: u8, rs: u8, rb: u8) -> Self {
         Self { rt: rs, ra, rb, xo: 124, rc: false }
     }
+
+    /// CMP: compare ra with rb as signed integers, set CR field bf.
+    /// Compares all 64 bits when l is true and the low 32 bits otherwise.
+    /// The bits where rt usually goes hold bf, a reserved bit, and l.
+    /// Power ISA 2.07B, Book I, Fixed-Point Compare Instructions
+    pub fn cmp(bf: u8, l: bool, ra: u8, rb: u8) -> Self {
+        assert!(bf < 8);
+        Self { rt: (bf << 2) | (l as u8), ra, rb, xo: 0, rc: false }
+    }
+
+    /// CMPL: compare ra with rb as unsigned integers, set CR field bf.
+    /// Compares all 64 bits when l is true and the low 32 bits otherwise.
+    /// Power ISA 2.07B, Book I, Fixed-Point Compare Instructions
+    pub fn cmpl(bf: u8, l: bool, ra: u8, rb: u8) -> Self {
+        assert!(bf < 8);
+        Self { rt: (bf << 2) | (l as u8), ra, rb, xo: 32, rc: false }
+    }
 }
 
 impl From<XForm> for u32 {
@@ -104,5 +121,29 @@ mod tests {
     fn test_nor() {
         let result: u32 = XForm::nor(3, 4, 5).into();
         assert_eq!(0x7c8328f8, result);
+    }
+
+    #[test]
+    fn test_cmp() {
+        let result: u32 = XForm::cmp(0, true, 3, 4).into();
+        assert_eq!(0x7c232000, result);
+    }
+
+    #[test]
+    fn test_cmp_32_bits() {
+        let result: u32 = XForm::cmp(0, false, 3, 4).into();
+        assert_eq!(0x7c032000, result);
+    }
+
+    #[test]
+    fn test_cmpl() {
+        let result: u32 = XForm::cmpl(0, true, 3, 4).into();
+        assert_eq!(0x7c232040, result);
+    }
+
+    #[test]
+    fn test_cmpl_32_bits() {
+        let result: u32 = XForm::cmpl(0, false, 3, 4).into();
+        assert_eq!(0x7c032040, result);
     }
 }
