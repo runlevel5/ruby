@@ -26,4 +26,9 @@ impl Condition {
     pub const NE: Self = Self { bo: Self::FALSE, bi: Self::CR0_EQ };
     pub const SO: Self = Self { bo: Self::TRUE, bi: Self::CR0_SO };
     pub const NS: Self = Self { bo: Self::FALSE, bi: Self::CR0_SO };
+
+    /// Whether the condition is met when its CR bit is set, rather than when it is clear.
+    pub fn expects_set(&self) -> bool {
+        self.bo == Self::TRUE
+    }
 }
