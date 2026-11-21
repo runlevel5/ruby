@@ -67,6 +67,24 @@ impl XForm {
         Self { rt: rs, ra, rb, xo: 794, rc: false }
     }
 
+    /// EXTSB: ra = low byte of rs, sign-extended
+    /// Power ISA 2.07B, Book I, Fixed-Point Logical Instructions
+    pub fn extsb(ra: u8, rs: u8) -> Self {
+        Self { rt: rs, ra, rb: 0, xo: 954, rc: false }
+    }
+
+    /// EXTSH: ra = low halfword of rs, sign-extended
+    /// Power ISA 2.07B, Book I, Fixed-Point Logical Instructions
+    pub fn extsh(ra: u8, rs: u8) -> Self {
+        Self { rt: rs, ra, rb: 0, xo: 922, rc: false }
+    }
+
+    /// EXTSW: ra = low word of rs, sign-extended
+    /// Power ISA 2.07B, Book I, Fixed-Point Logical Instructions
+    pub fn extsw(ra: u8, rs: u8) -> Self {
+        Self { rt: rs, ra, rb: 0, xo: 986, rc: false }
+    }
+
     /// CMP: compare ra with rb as signed integers, set CR field bf.
     /// Compares all 64 bits when l is true and the low 32 bits otherwise.
     /// The bits where rt usually goes hold bf, a reserved bit, and l.
@@ -338,5 +356,23 @@ mod tests {
     fn test_srad() {
         let result: u32 = XForm::srad(3, 4, 5).into();
         assert_eq!(0x7c832e34, result);
+    }
+
+    #[test]
+    fn test_extsb() {
+        let result: u32 = XForm::extsb(3, 4).into();
+        assert_eq!(0x7c830774, result);
+    }
+
+    #[test]
+    fn test_extsh() {
+        let result: u32 = XForm::extsh(3, 4).into();
+        assert_eq!(0x7c830734, result);
+    }
+
+    #[test]
+    fn test_extsw() {
+        let result: u32 = XForm::extsw(3, 4).into();
+        assert_eq!(0x7c8307b4, result);
     }
 }

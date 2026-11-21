@@ -459,6 +459,24 @@ pub fn srdi(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, sh: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// EXTSB - sign-extend the low byte of rs, put the result in ra
+pub fn extsb(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::extsb(reg_no(ra), reg_no(rs)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// EXTSH - sign-extend the low halfword of rs, put the result in ra
+pub fn extsh(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::extsh(reg_no(ra), reg_no(rs)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// EXTSW - sign-extend the low word of rs, put the result in ra
+pub fn extsw(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::extsw(reg_no(ra), reg_no(rs)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,5 +1003,26 @@ mod tests {
     #[should_panic(expected = "Expected unsigned 6-bit immediate")]
     fn test_sldi_64() {
         compile(|cb| sldi(cb, R3, R4, PPC64Opnd::new_uimm(64)));
+    }
+
+    #[test]
+    fn test_extsb() {
+        let cb = compile(|cb| extsb(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: extsb r3, r4");
+        assert_snapshot!(cb.hexdump(), @"7407837c");
+    }
+
+    #[test]
+    fn test_extsh() {
+        let cb = compile(|cb| extsh(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: extsh r3, r4");
+        assert_snapshot!(cb.hexdump(), @"3407837c");
+    }
+
+    #[test]
+    fn test_extsw() {
+        let cb = compile(|cb| extsw(cb, R3, R4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: extsw r3, r4");
+        assert_snapshot!(cb.hexdump(), @"b407837c");
     }
 }
