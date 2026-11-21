@@ -397,6 +397,68 @@ pub fn lhbrx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// Unwrap an immediate operand that fits in an unsigned 6-bit field.
+fn uimm6(opnd: PPC64Opnd) -> u8 {
+    let uimm = match opnd {
+        PPC64Opnd::Imm(imm) => u8::try_from(imm).ok(),
+        PPC64Opnd::UImm(uimm) => u8::try_from(uimm).ok(),
+        _ => None,
+    };
+    uimm.filter(|&uimm| uimm < 64).unwrap_or_else(|| panic!("Expected unsigned 6-bit immediate, got {opnd:?}"))
+}
+
+/// SLD - shift rs left by rb, put the result in ra
+pub fn sld(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::sld(reg_no(ra), reg_no(rs), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SRD - shift rs right by rb, put the result in ra
+pub fn srd(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::srd(reg_no(ra), reg_no(rs), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SRAD - shift rs right by rb while keeping its sign, put the result in ra
+pub fn srad(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::srad(reg_no(ra), reg_no(rs), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SRADI - shift rs right by an immediate while keeping its sign, put the result in ra
+pub fn sradi(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, sh: PPC64Opnd) {
+    let bytes: [u8; 4] = XSForm::sradi(reg_no(ra), reg_no(rs), uimm6(sh)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// RLDICL - rotate rs left by sh, clear the bits to the left of bit mb, put the result in ra.
+/// Bit 0 is the most significant.
+pub fn rldicl(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, sh: PPC64Opnd, mb: PPC64Opnd) {
+    let bytes: [u8; 4] = MDForm::rldicl(reg_no(ra), reg_no(rs), uimm6(sh), uimm6(mb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// RLDICR - rotate rs left by sh, clear the bits to the right of bit me, put the result in ra.
+/// Bit 0 is the most significant.
+pub fn rldicr(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, sh: PPC64Opnd, me: PPC64Opnd) {
+    let bytes: [u8; 4] = MDForm::rldicr(reg_no(ra), reg_no(rs), uimm6(sh), uimm6(me)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SLDI - shift rs left by an immediate, put the result in ra
+pub fn sldi(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, sh: PPC64Opnd) {
+    let sh = uimm6(sh);
+    let bytes: [u8; 4] = MDForm::rldicr(reg_no(ra), reg_no(rs), sh, 63 - sh).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SRDI - shift rs right by an immediate, put the result in ra
+pub fn srdi(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, sh: PPC64Opnd) {
+    let sh = uimm6(sh);
+    let bytes: [u8; 4] = MDForm::rldicl(reg_no(ra), reg_no(rs), (64 - sh) % 64, sh).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,5 +902,88 @@ mod tests {
     #[should_panic(expected = "r0 reads as zero when used as a base register")]
     fn test_ldx_r0_base() {
         compile(|cb| ldx(cb, R3, R0, R5));
+    }
+
+    #[test]
+    fn test_sld() {
+        let cb = compile(|cb| sld(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sld r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"3628837c");
+    }
+
+    #[test]
+    fn test_srd() {
+        let cb = compile(|cb| srd(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: srd r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"362c837c");
+    }
+
+    #[test]
+    fn test_srad() {
+        let cb = compile(|cb| srad(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: srad r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"342e837c");
+    }
+
+    #[test]
+    fn test_sradi() {
+        let cb = compile(|cb| sradi(cb, R3, R4, PPC64Opnd::new_uimm(1)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sradi r3, r4, 1");
+        assert_snapshot!(cb.hexdump(), @"740e837c");
+    }
+
+    #[test]
+    fn test_sradi_63() {
+        let cb = compile(|cb| sradi(cb, R3, R4, PPC64Opnd::new_uimm(63)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sradi r3, r4, 0x3f");
+        assert_snapshot!(cb.hexdump(), @"76fe837c");
+    }
+
+    #[test]
+    fn test_rldicl() {
+        let cb = compile(|cb| rldicl(cb, R3, R4, PPC64Opnd::new_uimm(0), PPC64Opnd::new_uimm(32)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: clrldi r3, r4, 0x20");
+        assert_snapshot!(cb.hexdump(), @"20008378");
+    }
+
+    #[test]
+    fn test_rldicr() {
+        let cb = compile(|cb| rldicr(cb, R3, R4, PPC64Opnd::new_uimm(32), PPC64Opnd::new_uimm(31)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sldi r3, r4, 0x20");
+        assert_snapshot!(cb.hexdump(), @"c6078378");
+    }
+
+    #[test]
+    fn test_sldi() {
+        let cb = compile(|cb| sldi(cb, R3, R4, PPC64Opnd::new_uimm(1)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sldi r3, r4, 1");
+        assert_snapshot!(cb.hexdump(), @"a40f8378");
+    }
+
+    #[test]
+    fn test_sldi_63() {
+        let cb = compile(|cb| sldi(cb, R3, R4, PPC64Opnd::new_uimm(63)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sldi r3, r4, 0x3f");
+        assert_snapshot!(cb.hexdump(), @"06f88378");
+    }
+
+    #[test]
+    fn test_srdi() {
+        let cb = compile(|cb| srdi(cb, R3, R4, PPC64Opnd::new_uimm(1)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: rldicl r3, r4, 0x3f, 1");
+        assert_snapshot!(cb.hexdump(), @"42f88378");
+    }
+
+    #[test]
+    fn test_srdi_63() {
+        let cb = compile(|cb| srdi(cb, R3, R4, PPC64Opnd::new_uimm(63)));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: rldicl r3, r4, 1, 0x3f");
+        assert_snapshot!(cb.hexdump(), @"e00f8378");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected unsigned 6-bit immediate")]
+    fn test_sldi_64() {
+        compile(|cb| sldi(cb, R3, R4, PPC64Opnd::new_uimm(64)));
     }
 }
