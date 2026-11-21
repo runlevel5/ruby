@@ -49,6 +49,24 @@ impl XForm {
         Self { rt: rs, ra, rb, xo: 124, rc: false }
     }
 
+    /// SLD: ra = rs shifted left by the low 7 bits of rb, which gives zero for 64 and above
+    /// Power ISA 2.07B, Book I, Fixed-Point Rotate and Shift Instructions
+    pub fn sld(ra: u8, rs: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 27, rc: false }
+    }
+
+    /// SRD: ra = rs shifted right by the low 7 bits of rb, which gives zero for 64 and above
+    /// Power ISA 2.07B, Book I, Fixed-Point Rotate and Shift Instructions
+    pub fn srd(ra: u8, rs: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 539, rc: false }
+    }
+
+    /// SRAD: ra = rs shifted right by the low 7 bits of rb, filling with copies of the sign bit
+    /// Power ISA 2.07B, Book I, Fixed-Point Rotate and Shift Instructions
+    pub fn srad(ra: u8, rs: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 794, rc: false }
+    }
+
     /// CMP: compare ra with rb as signed integers, set CR field bf.
     /// Compares all 64 bits when l is true and the low 32 bits otherwise.
     /// The bits where rt usually goes hold bf, a reserved bit, and l.
@@ -302,5 +320,23 @@ mod tests {
     fn test_lhbrx() {
         let result: u32 = XForm::lhbrx(3, 4, 5).into();
         assert_eq!(0x7c642e2c, result);
+    }
+
+    #[test]
+    fn test_sld() {
+        let result: u32 = XForm::sld(3, 4, 5).into();
+        assert_eq!(0x7c832836, result);
+    }
+
+    #[test]
+    fn test_srd() {
+        let result: u32 = XForm::srd(3, 4, 5).into();
+        assert_eq!(0x7c832c36, result);
+    }
+
+    #[test]
+    fn test_srad() {
+        let result: u32 = XForm::srad(3, 4, 5).into();
+        assert_eq!(0x7c832e34, result);
     }
 }
