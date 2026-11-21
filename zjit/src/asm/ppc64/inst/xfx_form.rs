@@ -19,6 +19,9 @@ pub struct XFXForm {
 }
 
 impl XFXForm {
+    /// The number of the fixed-point exception register.
+    pub const XER: u16 = 1;
+
     /// The number of the link register.
     pub const LR: u16 = 8;
 
@@ -80,5 +83,11 @@ mod tests {
     fn test_mtspr_ctr() {
         let result: u32 = XFXForm::mtspr(XFXForm::CTR, 12).into();
         assert_eq!(0x7d8903a6, result);
+    }
+
+    #[test]
+    fn test_mtspr_xer() {
+        let result: u32 = XFXForm::mtspr(XFXForm::XER, 0).into();
+        assert_eq!(0x7c0103a6, result);
     }
 }

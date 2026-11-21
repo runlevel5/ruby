@@ -574,6 +574,12 @@ pub fn mtctr(cb: &mut CodeBlock, rs: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// MTXER - copy rs to XER
+pub fn mtxer(cb: &mut CodeBlock, rs: PPC64Opnd) {
+    let bytes: [u8; 4] = XFXForm::mtspr(XFXForm::XER, reg_no(rs)).into();
+    cb.write_bytes(&bytes);
+}
+
 /// ISEL - put truthy in rt if CR0 meets the condition, and falsy otherwise
 pub fn isel(cb: &mut CodeBlock, rt: PPC64Opnd, truthy: PPC64Opnd, falsy: PPC64Opnd, cond: Condition) {
     // The instruction only picks its first operand when a CR bit is set
@@ -1321,6 +1327,13 @@ mod tests {
         let cb = compile(|cb| mtctr(cb, R12));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtctr r12");
         assert_snapshot!(cb.hexdump(), @"a603897d");
+    }
+
+    #[test]
+    fn test_mtxer() {
+        let cb = compile(|cb| mtxer(cb, R0));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtxer r0");
+        assert_snapshot!(cb.hexdump(), @"a603017c");
     }
 
     #[test]
