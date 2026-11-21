@@ -516,6 +516,24 @@ pub fn bc(cb: &mut CodeBlock, cond: Condition, offset: i64) {
     cb.write_bytes(&bytes);
 }
 
+/// BLR - branch to the address in LR
+pub fn blr(cb: &mut CodeBlock) {
+    let bytes: [u8; 4] = XLForm::blr().into();
+    cb.write_bytes(&bytes);
+}
+
+/// BCTR - branch to the address in CTR
+pub fn bctr(cb: &mut CodeBlock) {
+    let bytes: [u8; 4] = XLForm::bctr().into();
+    cb.write_bytes(&bytes);
+}
+
+/// BCTRL - branch to the address in CTR, put the return address in LR
+pub fn bctrl(cb: &mut CodeBlock) {
+    let bytes: [u8; 4] = XLForm::bctrl().into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,6 +1176,27 @@ mod tests {
         let cb = compile(|cb| bc(cb, Condition::NS, 8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bns 8");
         assert_snapshot!(cb.hexdump(), @"08008340");
+    }
+
+    #[test]
+    fn test_blr() {
+        let cb = compile(blr);
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: blr");
+        assert_snapshot!(cb.hexdump(), @"2000804e");
+    }
+
+    #[test]
+    fn test_bctr() {
+        let cb = compile(bctr);
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bctr");
+        assert_snapshot!(cb.hexdump(), @"2004804e");
+    }
+
+    #[test]
+    fn test_bctrl() {
+        let cb = compile(bctrl);
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bctrl");
+        assert_snapshot!(cb.hexdump(), @"2104804e");
     }
 
     #[test]
