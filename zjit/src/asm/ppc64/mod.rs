@@ -477,6 +477,31 @@ pub fn extsw(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// Whether a signed value that is a multiple of 4 fits within the specified number of bits.
+const fn offset_fits_bits(offset: i64, num_bits: u32) -> bool {
+    let limit = 1 << (num_bits - 1);
+    offset % 4 == 0 && -limit <= offset && offset < limit
+}
+
+/// Whether b and bl can reach a target that is this many bytes away
+pub const fn b_offset_fits(offset: i64) -> bool {
+    offset_fits_bits(offset, IForm::OFFSET_BITS)
+}
+
+/// B - branch to the instruction that is offset bytes away from this one
+pub fn b(cb: &mut CodeBlock, offset: i64) {
+    assert!(b_offset_fits(offset), "The offset must be a multiple of 4 that fits in 26 bits, got {offset}");
+    let bytes: [u8; 4] = IForm::b(offset as i32).into();
+    cb.write_bytes(&bytes);
+}
+
+/// BL - branch to the instruction that is offset bytes away from this one, put the return address in LR
+pub fn bl(cb: &mut CodeBlock, offset: i64) {
+    assert!(b_offset_fits(offset), "The offset must be a multiple of 4 that fits in 26 bits, got {offset}");
+    let bytes: [u8; 4] = IForm::bl(offset as i32).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1024,5 +1049,41 @@ mod tests {
         let cb = compile(|cb| extsw(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: extsw r3, r4");
         assert_snapshot!(cb.hexdump(), @"b407837c");
+    }
+
+    #[test]
+    fn test_b_offset_fits() {
+        assert!(b_offset_fits(0x1fffffc));
+        assert!(b_offset_fits(-0x2000000));
+        assert!(!b_offset_fits(0x2000000));
+        assert!(!b_offset_fits(-0x2000004));
+        assert!(!b_offset_fits(2));
+    }
+
+    #[test]
+    fn test_b() {
+        let cb = compile(|cb| b(cb, 256));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: b 0x100");
+        assert_snapshot!(cb.hexdump(), @"00010048");
+    }
+
+    #[test]
+    fn test_b_backward() {
+        let cb = compile(|cb| b(cb, -4));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: b 0xfffffffffffffffc");
+        assert_snapshot!(cb.hexdump(), @"fcffff4b");
+    }
+
+    #[test]
+    fn test_bl() {
+        let cb = compile(|cb| bl(cb, 8));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: bl 8");
+        assert_snapshot!(cb.hexdump(), @"09000048");
+    }
+
+    #[test]
+    #[should_panic(expected = "The offset must be a multiple of 4 that fits in 26 bits")]
+    fn test_b_too_far() {
+        compile(|cb| b(cb, 0x2000000));
     }
 }
