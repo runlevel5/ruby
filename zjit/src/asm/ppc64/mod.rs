@@ -534,6 +534,24 @@ pub fn bctrl(cb: &mut CodeBlock) {
     cb.write_bytes(&bytes);
 }
 
+/// MFLR - copy LR to rt
+pub fn mflr(cb: &mut CodeBlock, rt: PPC64Opnd) {
+    let bytes: [u8; 4] = XFXForm::mfspr(reg_no(rt), XFXForm::LR).into();
+    cb.write_bytes(&bytes);
+}
+
+/// MTLR - copy rs to LR
+pub fn mtlr(cb: &mut CodeBlock, rs: PPC64Opnd) {
+    let bytes: [u8; 4] = XFXForm::mtspr(XFXForm::LR, reg_no(rs)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// MTCTR - copy rs to CTR
+pub fn mtctr(cb: &mut CodeBlock, rs: PPC64Opnd) {
+    let bytes: [u8; 4] = XFXForm::mtspr(XFXForm::CTR, reg_no(rs)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1209,5 +1227,26 @@ mod tests {
     #[should_panic(expected = "The offset must be a multiple of 4 that fits in 16 bits")]
     fn test_bc_too_far() {
         compile(|cb| bc(cb, Condition::EQ, 0x8000));
+    }
+
+    #[test]
+    fn test_mflr() {
+        let cb = compile(|cb| mflr(cb, R0));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mflr r0");
+        assert_snapshot!(cb.hexdump(), @"a602087c");
+    }
+
+    #[test]
+    fn test_mtlr() {
+        let cb = compile(|cb| mtlr(cb, R0));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtlr r0");
+        assert_snapshot!(cb.hexdump(), @"a603087c");
+    }
+
+    #[test]
+    fn test_mtctr() {
+        let cb = compile(|cb| mtctr(cb, R12));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtctr r12");
+        assert_snapshot!(cb.hexdump(), @"a603897d");
     }
 }
