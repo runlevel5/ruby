@@ -251,6 +251,28 @@ pub fn mulhd(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// ADDO. - add ra and rb, put the result in rt, set SO of CR0 on signed overflow.
+/// SO is sticky, so it only tells about this addition if SO of XER was clear before it.
+pub fn addo_dot(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::addo_dot(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SUBFO. - subtract ra from rb, put the result in rt, set SO of CR0 on signed overflow.
+/// SO is sticky, so it only tells about this subtraction if SO of XER was clear before it.
+pub fn subfo_dot(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::subfo_dot(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// MULLDO. - multiply ra by rb, put the low 64 bits of the product in rt, set SO of CR0
+/// if the product does not fit in them.
+/// SO is sticky, so it only tells about this multiplication if SO of XER was clear before it.
+pub fn mulldo_dot(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::mulldo_dot(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
 /// AND - and rs with rb, put the result in ra
 pub fn and(cb: &mut CodeBlock, ra: PPC64Opnd, rs: PPC64Opnd, rb: PPC64Opnd) {
     let bytes: [u8; 4] = XForm::and(reg_no(ra), reg_no(rs), reg_no(rb), false).into();
@@ -848,6 +870,30 @@ mod tests {
         let cb = compile(|cb| mulhd(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mulhd r3, r4, r5");
         assert_snapshot!(cb.hexdump(), @"9228647c");
+    }
+
+    #[test]
+    fn test_addo_dot() {
+        let cb = compile(|cb| addo_dot(cb, R3, R4, R5));
+        // Capstone doesn't decode the overflow-recording forms
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x15, 0x2e, 0x64, 0x7c");
+        assert_snapshot!(cb.hexdump(), @"152e647c");
+    }
+
+    #[test]
+    fn test_subfo_dot() {
+        let cb = compile(|cb| subfo_dot(cb, R3, R4, R5));
+        // Capstone doesn't decode the overflow-recording forms
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x51, 0x2c, 0x64, 0x7c");
+        assert_snapshot!(cb.hexdump(), @"512c647c");
+    }
+
+    #[test]
+    fn test_mulldo_dot() {
+        let cb = compile(|cb| mulldo_dot(cb, R3, R4, R5));
+        // Capstone doesn't decode the overflow-recording forms
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0xd3, 0x2d, 0x64, 0x7c");
+        assert_snapshot!(cb.hexdump(), @"d32d647c");
     }
 
     #[test]
