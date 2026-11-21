@@ -8,6 +8,7 @@
 /// Bits are numbered as in the Power ISA, where bit 0 is the most significant.
 pub struct XForm {
     /// The number of the target register, or of the source register for logical instructions.
+    /// Holds the conditions to trap on for tw.
     rt: u8,
 
     /// The number of the first operand register, or of the target register for logical instructions.
@@ -20,7 +21,7 @@ pub struct XForm {
     /// The extended opcode.
     xo: u16,
 
-    /// Whether to set CR0 by comparing the result with zero.
+    /// Whether to set CR0 by comparing the result with zero. Always set for stdcx.
     rc: bool,
 }
 
@@ -178,6 +179,25 @@ impl XForm {
     /// Power ISA 2.07B, Book I, Fixed-Point Load and Store with Byte Reversal Instructions
     pub fn lhbrx(rt: u8, ra: u8, rb: u8) -> Self {
         Self { rt, ra, rb, xo: 790, rc: false }
+    }
+
+    /// LDARX: rt = doubleword at (ra|0) + rb, and reserve that address for a following stdcx.
+    /// Power ISA 2.07B, Book II, Load and Reserve and Store Conditional Instructions
+    pub fn ldarx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 84, rc: false }
+    }
+
+    /// STDCX.: store rs at (ra|0) + rb if the reservation from ldarx still holds, and set
+    /// EQ of CR0 to whether it did
+    /// Power ISA 2.07B, Book II, Load and Reserve and Store Conditional Instructions
+    pub fn stdcx_dot(rs: u8, ra: u8, rb: u8) -> Self {
+        Self { rt: rs, ra, rb, xo: 214, rc: true }
+    }
+
+    /// TRAP: raise a trap exception unconditionally. This is tw with all five conditions selected.
+    /// Power ISA 2.07B, Book I, Fixed-Point Trap Instructions
+    pub fn trap() -> Self {
+        Self { rt: 31, ra: 0, rb: 0, xo: 4, rc: false }
     }
 }
 
@@ -374,5 +394,23 @@ mod tests {
     fn test_extsw() {
         let result: u32 = XForm::extsw(3, 4).into();
         assert_eq!(0x7c8307b4, result);
+    }
+
+    #[test]
+    fn test_ldarx() {
+        let result: u32 = XForm::ldarx(3, 4, 5).into();
+        assert_eq!(0x7c6428a8, result);
+    }
+
+    #[test]
+    fn test_stdcx_dot() {
+        let result: u32 = XForm::stdcx_dot(3, 4, 5).into();
+        assert_eq!(0x7c6429ad, result);
+    }
+
+    #[test]
+    fn test_trap() {
+        let result: u32 = XForm::trap().into();
+        assert_eq!(0x7fe00008, result);
     }
 }

@@ -561,6 +561,24 @@ pub fn isel(cb: &mut CodeBlock, rt: PPC64Opnd, truthy: PPC64Opnd, falsy: PPC64Op
     cb.write_bytes(&bytes);
 }
 
+/// LDARX - load a doubleword from memory at ra + rb into rt, and reserve the address
+pub fn ldarx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::ldarx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STDCX. - store rs into memory at ra + rb if the address is still reserved, set EQ of CR0 on success
+pub fn stdcx_dot(cb: &mut CodeBlock, rs: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::stdcx_dot(reg_no(rs), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// TRAP - raise a trap exception, which the kernel delivers as SIGTRAP
+pub fn trap(cb: &mut CodeBlock) {
+    let bytes: [u8; 4] = XForm::trap().into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1304,5 +1322,26 @@ mod tests {
     #[should_panic(expected = "isel reads r0 as zero in its first operand")]
     fn test_isel_r0_falsy_inverted() {
         compile(|cb| isel(cb, R3, R4, R0, Condition::NE));
+    }
+
+    #[test]
+    fn test_ldarx() {
+        let cb = compile(|cb| ldarx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: ldarx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"a828647c");
+    }
+
+    #[test]
+    fn test_stdcx_dot() {
+        let cb = compile(|cb| stdcx_dot(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: stdcx. r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"ad29647c");
+    }
+
+    #[test]
+    fn test_trap() {
+        let cb = compile(trap);
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: trap");
+        assert_snapshot!(cb.hexdump(), @"0800e07f");
     }
 }
