@@ -125,6 +125,24 @@ impl XForm {
     pub fn stwx(rs: u8, ra: u8, rb: u8) -> Self {
         Self { rt: rs, ra, rb, xo: 151, rc: false }
     }
+
+    /// LDBRX: rt = byte-reversed doubleword at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load and Store with Byte Reversal Instructions
+    pub fn ldbrx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 532, rc: false }
+    }
+
+    /// LWBRX: rt = zero-extended byte-reversed word at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load and Store with Byte Reversal Instructions
+    pub fn lwbrx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 534, rc: false }
+    }
+
+    /// LHBRX: rt = zero-extended byte-reversed halfword at (ra|0) + rb
+    /// Power ISA 2.07B, Book I, Fixed-Point Load and Store with Byte Reversal Instructions
+    pub fn lhbrx(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { rt, ra, rb, xo: 790, rc: false }
+    }
 }
 
 impl From<XForm> for u32 {
@@ -266,5 +284,23 @@ mod tests {
     fn test_stwx() {
         let result: u32 = XForm::stwx(3, 4, 5).into();
         assert_eq!(0x7c64292e, result);
+    }
+
+    #[test]
+    fn test_ldbrx() {
+        let result: u32 = XForm::ldbrx(3, 4, 5).into();
+        assert_eq!(0x7c642c28, result);
+    }
+
+    #[test]
+    fn test_lwbrx() {
+        let result: u32 = XForm::lwbrx(3, 4, 5).into();
+        assert_eq!(0x7c642c2c, result);
+    }
+
+    #[test]
+    fn test_lhbrx() {
+        let result: u32 = XForm::lhbrx(3, 4, 5).into();
+        assert_eq!(0x7c642e2c, result);
     }
 }

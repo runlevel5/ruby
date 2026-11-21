@@ -379,6 +379,24 @@ pub fn stwx(cb: &mut CodeBlock, rs: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// LDBRX - load a doubleword from memory at ra + rb into rt with its bytes reversed
+pub fn ldbrx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::ldbrx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LWBRX - load a word from memory at ra + rb into rt with its bytes reversed, zero-extended
+pub fn lwbrx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::lwbrx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// LHBRX - load a halfword from memory at ra + rb into rt with its bytes reversed, zero-extended
+pub fn lhbrx(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::lhbrx(reg_no(rt), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +813,27 @@ mod tests {
         let cb = compile(|cb| stwx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stwx r3, r4, r5");
         assert_snapshot!(cb.hexdump(), @"2e29647c");
+    }
+
+    #[test]
+    fn test_ldbrx() {
+        let cb = compile(|cb| ldbrx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: ldbrx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"282c647c");
+    }
+
+    #[test]
+    fn test_lwbrx() {
+        let cb = compile(|cb| lwbrx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwbrx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2c2c647c");
+    }
+
+    #[test]
+    fn test_lhbrx() {
+        let cb = compile(|cb| lhbrx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhbrx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2c2e647c");
     }
 
     #[test]
