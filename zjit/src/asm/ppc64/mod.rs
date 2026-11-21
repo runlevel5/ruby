@@ -355,6 +355,30 @@ pub fn lwax(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// STDX - store rs into memory at ra + rb
+pub fn stdx(cb: &mut CodeBlock, rs: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::stdx(reg_no(rs), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STBX - store the low byte of rs into memory at ra + rb
+pub fn stbx(cb: &mut CodeBlock, rs: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::stbx(reg_no(rs), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STHX - store the low halfword of rs into memory at ra + rb
+pub fn sthx(cb: &mut CodeBlock, rs: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::sthx(reg_no(rs), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// STWX - store the low word of rs into memory at ra + rb
+pub fn stwx(cb: &mut CodeBlock, rs: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XForm::stwx(reg_no(rs), base_reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,6 +767,34 @@ mod tests {
         let cb = compile(|cb| lwax(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwax r3, r4, r5");
         assert_snapshot!(cb.hexdump(), @"aa2a647c");
+    }
+
+    #[test]
+    fn test_stdx() {
+        let cb = compile(|cb| stdx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: stdx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2a29647c");
+    }
+
+    #[test]
+    fn test_stbx() {
+        let cb = compile(|cb| stbx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: stbx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"ae29647c");
+    }
+
+    #[test]
+    fn test_sthx() {
+        let cb = compile(|cb| sthx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: sthx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2e2b647c");
+    }
+
+    #[test]
+    fn test_stwx() {
+        let cb = compile(|cb| stwx(cb, R3, R4, R5));
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: stwx r3, r4, r5");
+        assert_snapshot!(cb.hexdump(), @"2e29647c");
     }
 
     #[test]
