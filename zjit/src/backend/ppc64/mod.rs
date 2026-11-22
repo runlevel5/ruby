@@ -466,6 +466,25 @@ impl Assembler {
             ld(cb, dest, PPC64Opnd::new_mem(64, dest, 0));
         }
 
+        /// Return the register that an operand is in. An immediate is loaded into EMIT_OPND first.
+        fn emit_reg_or_imm(cb: &mut CodeBlock, opnd: &Opnd) -> PPC64Opnd {
+            match imm_opnd_value(opnd) {
+                Some(imm) => {
+                    emit_load_value(cb, Assembler::EMIT_OPND, imm as u64);
+                    Assembler::EMIT_OPND
+                }
+                None => opnd.into(),
+            }
+        }
+
+        /// Clear the upper 32 bits of the result of a 32-bit operation, like
+        /// writing to a 32-bit register does on the other platforms
+        fn emit_truncate_result(cb: &mut CodeBlock, out: &Opnd) {
+            if out.rm_num_bits() == 32 {
+                rldicl(cb, out.into(), out.into(), PPC64Opnd::new_uimm(0), PPC64Opnd::new_uimm(32));
+            }
+        }
+
         /// Fill nops until a jump written at `last_patch_pos` can no longer reach
         /// past the current write position.
         fn emit_pad_after_patch_point(cb: &mut CodeBlock, last_patch_pos: Option<usize>) {
@@ -520,6 +539,34 @@ impl Assembler {
                     for _ in 0..(4 - ((text.len() + 1) % 4)) {
                         cb.write_byte(0);
                     }
+                },
+                Insn::Add { left, right, out } => {
+                    match imm_opnd_value(right) {
+                        Some(imm) if i16::try_from(imm).is_ok() => {
+                            addi(cb, out.into(), left.into(), PPC64Opnd::new_imm(imm));
+                        }
+                        _ => {
+                            let right = emit_reg_or_imm(cb, right);
+                            add(cb, out.into(), left.into(), right);
+                        }
+                    }
+                    emit_truncate_result(cb, out);
+                },
+                Insn::Sub { left, right, out } => {
+                    // There is no instruction to subtract an immediate. Add its negation.
+                    let negated = imm_opnd_value(right)
+                        .and_then(i64::checked_neg)
+                        .filter(|negated| i16::try_from(*negated).is_ok());
+                    match negated {
+                        Some(negated) => {
+                            addi(cb, out.into(), left.into(), PPC64Opnd::new_imm(negated));
+                        }
+                        _ => {
+                            let right = emit_reg_or_imm(cb, right);
+                            subf(cb, out.into(), right, left.into());
+                        }
+                    }
+                    emit_truncate_result(cb, out);
                 },
                 Insn::Store { dest, src } => {
                     // Split src into EMIT_OPND if necessary
@@ -1358,5 +1405,76 @@ mod tests {
         load r3, address
         addis r3, r3, 0
         ");
+    }
+
+    #[test]
+    fn test_emit_add() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Imm(-8), out: Opnd::Reg(R3_REG) });
+        // An immediate that addi can't encode goes through r0
+        asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::UImm(0x8000), out: Opnd::Reg(R3_REG) });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: add r3, r4, r5
+        0x4: addi r3, r4, -8
+        0x8: lis r0, 0
+        0xc: ori r0, r0, 0x8000
+        0x10: add r3, r4, r0
+        ");
+        assert_snapshot!(cb.hexdump(), @"142a647cf8ff64380000003c008000601402647c");
+    }
+
+    #[test]
+    fn test_emit_sub() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // subf takes its operands the other way around
+        asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        // Subtracting an immediate is adding its negation
+        asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::UImm(1), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::Imm(-0x8000), out: Opnd::Reg(R3_REG) });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: subf r3, r5, r4
+        0x4: addi r3, r4, -1
+        0x8: li r0, -0x8000
+        0xc: subf r3, r0, r4
+        ");
+        assert_snapshot!(cb.hexdump(), @"5020657cffff6438008000385020607c");
+    }
+
+    #[test]
+    fn test_emit_add_32_bits() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let (out, left, right) = (Opnd::Reg(R3_REG).with_num_bits(32), Opnd::Reg(R4_REG).with_num_bits(32), Opnd::Reg(R5_REG).with_num_bits(32));
+        asm.push_insn(Insn::Add { left, right, out });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        // The upper 32 bits of the sum are cleared
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: add r3, r4, r5
+        0x4: clrldi r3, r3, 0x20
+        ");
+        assert_snapshot!(cb.hexdump(), @"142a647c20006378");
+    }
+
+    #[test]
+    fn test_sp_movements_are_single_instruction() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.add_into(NATIVE_STACK_PTR, 0x20.into());
+        asm.sub_into(NATIVE_STACK_PTR, 0x20.into());
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addi r1, r1, 0x20
+        0x4: addi r1, r1, -0x20
+        ");
+        assert_snapshot!(cb.hexdump(), @"20002138e0ff2138");
     }
 }
