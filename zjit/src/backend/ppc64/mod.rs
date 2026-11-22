@@ -5,6 +5,7 @@ use crate::backend::lir::*;
 use crate::options::asm_dump;
 use crate::stats::{CompileError, trace_compile_phase};
 use crate::virtualmem::CodePtr;
+use crate::cast::*;
 
 // Use the PPC64 register type for this platform
 pub type Reg = PPC64Reg;
@@ -601,6 +602,27 @@ impl Assembler {
                     };
                     emit_add_disp(cb, out.into(), PPC64Opnd::Reg(mem_base_reg(base_reg_no)), disp);
                 }
+                Insn::LeaJumpTarget { out, target, .. } => {
+                    if let Target::Label(label_idx) = target {
+                        // Set output to the raw address of the label. There is no PC-relative
+                        // address calculation, so start from the address we are at, and add
+                        // the distance to the label once it's known.
+                        let out: PPC64Opnd = out.into();
+                        let base_addr = cb.get_write_pos() as i64;
+                        emit_load_value(cb, out, cb.get_write_ptr().raw_addr(cb) as u64);
+                        cb.label_ref(*label_idx, 2 * 4, move |cb, _, dst_addr| {
+                            let (upper, lower) = split_disp(dst_addr - base_addr).ok_or(())?;
+                            addis(cb, out, out, PPC64Opnd::new_imm(upper.into()));
+                            addi(cb, out, out, PPC64Opnd::new_imm(lower.into()));
+                            Ok(())
+                        });
+                    } else {
+                        // Set output to the jump target's raw address
+                        let target_code = target.unwrap_code_ptr();
+                        let target_addr = target_code.raw_addr(cb).as_u64();
+                        emit_load_value(cb, out.into(), target_addr);
+                    }
+                },
                 Insn::JmpOpnd(opnd) => {
                     mtctr(cb, opnd.into());
                     bctr(cb);
@@ -1315,5 +1337,26 @@ mod tests {
         0x14: nop
         ");
         assert_snapshot!(cb.hexdump(), @"0000232c4c008241000000600000232c4000824000000060");
+    }
+
+    #[test]
+    #[cfg(feature = "disasm")]
+    fn test_emit_lea_label() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let label = asm.new_label("label");
+        asm.push_insn(Insn::LeaJumpTarget { out: Opnd::Reg(R3_REG), target: label.clone() });
+        asm.write_label(label);
+        asm.bake_string("Hello, world!");
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        // The address we are at, plus the distance to the label
+        let disasm = stable_disasm(&cb, "r3");
+        let lea: Vec<&str> = disasm.lines().take(3).collect();
+        assert!(lea[2].starts_with("addi r3, r3, "), "the distance depends on what the load takes: {}", lea[2]);
+        assert_disasm_snapshot!(lea[..2].join("\n"), @"
+        load r3, address
+        addis r3, r3, 0
+        ");
     }
 }
