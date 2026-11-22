@@ -197,6 +197,14 @@ fn split_disp(disp: i64) -> Option<(i16, i16)> {
     Some((upper, lower))
 }
 
+/// Whether a Jo or a JoMul reads the outcome of the arithmetic instruction at insn_idx.
+/// Only instructions that move the result around come in between the two.
+fn overflow_checked(insns: &[Insn], insn_idx: usize) -> bool {
+    insns[insn_idx + 1..].iter()
+        .find(|insn| !matches!(insn, Insn::Store { .. } | Insn::Mov { .. } | Insn::Load { .. } | Insn::LoadInto { .. } | Insn::Comment(_) | Insn::PosMarker(_)))
+        .is_some_and(|insn| matches!(insn, Insn::Jo(_) | Insn::JoMul(_)))
+}
+
 /// List of registers that can be used for register allocation.
 /// SCRATCH0_OPND, SCRATCH1_OPND, and EMIT_OPND are excluded.
 pub const ALLOC_REGS: &[Reg] = &[
@@ -477,6 +485,13 @@ impl Assembler {
             }
         }
 
+        /// Clear SO of XER, which stays set once an operation has overflowed, so that
+        /// it tells about the overflow-recording instruction that comes next
+        fn emit_clear_overflow(cb: &mut CodeBlock) {
+            li(cb, Assembler::EMIT_OPND, PPC64Opnd::new_imm(0));
+            mtxer(cb, Assembler::EMIT_OPND);
+        }
+
         /// Clear the upper 32 bits of the result of a 32-bit operation, like
         /// writing to a 32-bit register does on the other platforms
         fn emit_truncate_result(cb: &mut CodeBlock, out: &Opnd) {
@@ -541,9 +556,15 @@ impl Assembler {
                     }
                 },
                 Insn::Add { left, right, out } => {
+                    let checked = overflow_checked(insns, insn_idx);
                     match imm_opnd_value(right) {
-                        Some(imm) if i16::try_from(imm).is_ok() => {
+                        Some(imm) if !checked && i16::try_from(imm).is_ok() => {
                             addi(cb, out.into(), left.into(), PPC64Opnd::new_imm(imm));
+                        }
+                        _ if checked => {
+                            emit_clear_overflow(cb);
+                            let right = emit_reg_or_imm(cb, right);
+                            addo_dot(cb, out.into(), left.into(), right);
                         }
                         _ => {
                             let right = emit_reg_or_imm(cb, right);
@@ -553,13 +574,19 @@ impl Assembler {
                     emit_truncate_result(cb, out);
                 },
                 Insn::Sub { left, right, out } => {
+                    let checked = overflow_checked(insns, insn_idx);
                     // There is no instruction to subtract an immediate. Add its negation.
                     let negated = imm_opnd_value(right)
                         .and_then(i64::checked_neg)
                         .filter(|negated| i16::try_from(*negated).is_ok());
                     match negated {
-                        Some(negated) => {
+                        Some(negated) if !checked => {
                             addi(cb, out.into(), left.into(), PPC64Opnd::new_imm(negated));
+                        }
+                        _ if checked => {
+                            emit_clear_overflow(cb);
+                            let right = emit_reg_or_imm(cb, right);
+                            subfo_dot(cb, out.into(), right, left.into());
                         }
                         _ => {
                             let right = emit_reg_or_imm(cb, right);
@@ -1476,5 +1503,67 @@ mod tests {
         0x4: addi r1, r1, -0x20
         ");
         assert_snapshot!(cb.hexdump(), @"20002138e0ff2138");
+    }
+
+    #[test]
+    fn test_emit_add_with_overflow_check() {
+        let (mut asm, mut cb) = setup_asm();
+        let overflow = asm.new_label("overflow");
+
+        // XER is cleared first, since its overflow bit is sticky. (.byte is addo.)
+        asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        // An immediate goes through r0 after r0 has cleared XER
+        asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Imm(1), out: Opnd::Reg(R3_REG) });
+        // The result may get stored before the check
+        asm.store(Opnd::mem(64, SP, 0), Opnd::Reg(R3_REG));
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.write_label(overflow);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r0, 0
+        0x4: mtxer r0
+        0x8: .byte 0x15, 0x2e, 0x64, 0x7c
+        0xc: bso 0x30
+        0x10: nop
+        0x14: li r0, 0
+        0x18: mtxer r0
+        0x1c: li r0, 1
+        0x20: .byte 0x15, 0x06, 0x64, 0x7c
+        0x24: std r3, 0(r30)
+        0x28: bso 0x30
+        0x2c: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"00000038a603017c152e647c240083410000006000000038a603017c010000381506647c00007ef80800834100000060");
+    }
+
+    #[test]
+    fn test_emit_sub_with_overflow_check() {
+        let (mut asm, mut cb) = setup_asm();
+        let overflow = asm.new_label("overflow");
+
+        // (.byte is subfo.)
+        asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::Imm(1), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.write_label(overflow);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r0, 0
+        0x4: mtxer r0
+        0x8: .byte 0x51, 0x24, 0x65, 0x7c
+        0xc: bso 0x2c
+        0x10: nop
+        0x14: li r0, 0
+        0x18: mtxer r0
+        0x1c: li r0, 1
+        0x20: .byte 0x51, 0x24, 0x60, 0x7c
+        0x24: bso 0x2c
+        0x28: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"00000038a603017c5124657c200083410000006000000038a603017c010000385124607c0800834100000060");
     }
 }
