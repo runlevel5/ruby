@@ -71,6 +71,38 @@ impl CodeBlock {
     }
 }
 
+/// Map Opnd to PPC64Opnd
+impl From<Opnd> for PPC64Opnd {
+    fn from(opnd: Opnd) -> Self {
+        match opnd {
+            Opnd::UImm(value) => PPC64Opnd::new_uimm(value),
+            Opnd::Imm(value) => PPC64Opnd::new_imm(value),
+            Opnd::Reg(reg) => PPC64Opnd::Reg(reg),
+            Opnd::Mem(Mem { base: MemBase::Reg(reg_no), num_bits, disp }) => {
+                PPC64Opnd::new_mem(num_bits, PPC64Opnd::Reg(mem_base_reg(reg_no)), disp)
+            },
+            Opnd::Mem(Mem { base: MemBase::VReg(_), .. }) => {
+                panic!("attempted to lower an Opnd::Mem with a MemBase::VReg base")
+            },
+            Opnd::Mem(Mem { base: MemBase::Stack { .. } | MemBase::StackIndirect { .. }, .. }) => {
+                panic!("attempted to lower an Opnd::Mem with a MemBase::Stack/StackIndirect base")
+            },
+            Opnd::VReg { .. } => panic!("attempted to lower an Opnd::VReg"),
+            Opnd::Value(_) => panic!("attempted to lower an Opnd::Value"),
+            Opnd::None => panic!(
+                "Attempted to lower an Opnd::None. This often happens when an out operand was not allocated for an instruction because the output of the instruction was not used. Please ensure you are using the output."
+            ),
+        }
+    }
+}
+
+/// Also implement going from a reference to an operand for convenience.
+impl From<&Opnd> for PPC64Opnd {
+    fn from(opnd: &Opnd) -> Self {
+        PPC64Opnd::from(*opnd)
+    }
+}
+
 /// List of registers that can be used for register allocation.
 /// SCRATCH0_OPND, SCRATCH1_OPND, and EMIT_OPND are excluded.
 pub const ALLOC_REGS: &[Reg] = &[
@@ -155,6 +187,18 @@ impl Assembler {
     /// Emit platform-specific machine code
     /// Returns a list of GC offsets. Can return failure to signal caller to retry.
     fn ppc64_emit(&mut self, cb: &mut CodeBlock) -> Result<Vec<CodePtr>, CompileError> {
+        /// Emit a copy of one register to another. A copy between registers of fewer than
+        /// 64 bits leaves zero in the bits above them, like on the other platforms.
+        fn emit_mov_reg(cb: &mut CodeBlock, dest: &Opnd, src: &Opnd) {
+            match dest.rm_num_bits().min(src.rm_num_bits()) {
+                64 => mr(cb, dest.into(), src.into()),
+                num_bits => {
+                    let clear_bits = PPC64Opnd::new_uimm(64 - u64::from(num_bits));
+                    rldicl(cb, dest.into(), src.into(), PPC64Opnd::new_uimm(0), clear_bits);
+                }
+            }
+        }
+
         /// Fill nops until a jump written at `last_patch_pos` can no longer reach
         /// past the current write position.
         fn emit_pad_after_patch_point(cb: &mut CodeBlock, last_patch_pos: Option<usize>) {
@@ -209,6 +253,9 @@ impl Assembler {
                     for _ in 0..(4 - ((text.len() + 1) % 4)) {
                         cb.write_byte(0);
                     }
+                },
+                Insn::Mov { dest, src } => {
+                    emit_mov_reg(cb, dest, src);
                 },
                 Insn::PatchPoint(..) => unreachable!("PatchPoint should have been lowered to PatchPointPad in ppc64_scratch_split"),
                 Insn::PatchPointPad => {
@@ -396,6 +443,22 @@ mod tests {
         // Testing that we pad the string to the nearest 4-byte boundary to make
         // it easier to jump over.
         assert_snapshot!(cb.hexdump(), @"48656c6c6f2c20776f726c6421000000");
+    }
+
+    #[test]
+    fn test_mov_reg() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.mov(Opnd::Reg(R3_REG), Opnd::Reg(R4_REG));
+        // Moving 32 bits leaves zero in the upper 32 bits
+        asm.mov(Opnd::Reg(R3_REG).with_num_bits(32), Opnd::Reg(R4_REG).with_num_bits(32));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mr r3, r4
+        0x4: clrldi r3, r4, 0x20
+        ");
+        assert_snapshot!(cb.hexdump(), @"7823837c20008378");
     }
 
     #[test]
