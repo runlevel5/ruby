@@ -647,6 +647,14 @@ impl Assembler {
                 Insn::Jo(target) | Insn::JoMul(target) => {
                     emit_conditional_jump(self, cb, Condition::SO, target.clone());
                 },
+                Insn::Joz(opnd, target) => {
+                    cmpdi(cb, opnd.into(), PPC64Opnd::new_imm(0));
+                    emit_conditional_jump(self, cb, Condition::EQ, target.clone());
+                },
+                Insn::Jonz(opnd, target) => {
+                    cmpdi(cb, opnd.into(), PPC64Opnd::new_imm(0));
+                    emit_conditional_jump(self, cb, Condition::NE, target.clone());
+                },
                 Insn::PatchPoint(..) => unreachable!("PatchPoint should have been lowered to PatchPointPad in ppc64_scratch_split"),
                 Insn::PatchPointPad => {
                     emit_pad_after_patch_point(cb, last_patch_pos);
@@ -1285,5 +1293,27 @@ mod tests {
         0x4: bctr
         ");
         assert_snapshot!(cb.hexdump(), @"a603697d2004804e");
+    }
+
+    #[test]
+    fn test_emit_joz_jonz() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let target: CodePtr = cb.get_write_ptr().add_bytes(80);
+
+        // There is no compare-and-branch, so these compare with zero first
+        asm.push_insn(Insn::Joz(Opnd::Reg(R3_REG), Target::CodePtr(target)));
+        asm.push_insn(Insn::Jonz(Opnd::Reg(R3_REG), Target::CodePtr(target)));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: cmpdi r3, 0
+        0x4: beq 0x50
+        0x8: nop
+        0xc: cmpdi r3, 0
+        0x10: bne 0x50
+        0x14: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"0000232c4c008241000000600000232c4000824000000060");
     }
 }
