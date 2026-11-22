@@ -422,6 +422,23 @@ impl Assembler {
                         }
                     };
                 },
+                Insn::LoadSExt { opnd, out } => {
+                    match *opnd {
+                        Opnd::Reg(Reg { num_bits: 32, .. }) |
+                        Opnd::VReg { num_bits: 32, .. } => {
+                            extsw(cb, out.into(), opnd.into());
+                        },
+                        // lwa only takes a displacement that is a multiple of 4
+                        Opnd::Mem(Mem { num_bits: 32, disp, .. }) if disp % 4 == 0 => {
+                            lwa(cb, out.into(), opnd.into());
+                        },
+                        Opnd::Mem(Mem { num_bits: 32, .. }) => {
+                            lwz(cb, out.into(), opnd.into());
+                            extsw(cb, out.into(), out.into());
+                        },
+                        _ => unreachable!()
+                    };
+                },
                 Insn::Mov { dest, src } => {
                     // ppc64_split() and ppc64_scratch_split() should have turned
                     // moves from and to memory into loads and stores.
@@ -755,6 +772,25 @@ mod tests {
         0xc: lbz r3, 1(r30)
         ");
         assert_snapshot!(cb.hexdump(), @"08007ee8fcff7e8002007ea001007e88");
+    }
+
+    #[test]
+    fn test_emit_load_sext() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.push_insn(Insn::LoadSExt { opnd: Opnd::Reg(R4_REG).with_num_bits(32), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::LoadSExt { opnd: Opnd::mem(32, SP, 4), out: Opnd::Reg(R3_REG) });
+        // lwa can't encode a displacement that isn't a multiple of 4
+        asm.push_insn(Insn::LoadSExt { opnd: Opnd::mem(32, SP, 2), out: Opnd::Reg(R3_REG) });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: extsw r3, r4
+        0x4: lwa r3, 4(r30)
+        0x8: lwz r3, 2(r30)
+        0xc: extsw r3, r3
+        ");
+        assert_snapshot!(cb.hexdump(), @"b407837c06007ee802007e80b407637c");
     }
 
     #[test]
