@@ -192,6 +192,12 @@ pub const SCRATCH_REG: Reg = R11_REG;
 impl Assembler {
     const MAX_FRAME_STACK_SLOTS: usize = 2048;
 
+    /// Special register for intermediate processing in ppc64_emit. It should be used only by ppc64_emit.
+    /// r0 reads as zero where an instruction takes the base of an address, which rules it out for
+    /// operands. That leaves loading immediates, which is what ppc64_emit needs a register for.
+    const EMIT_REG: Reg = R0_REG;
+    const EMIT_OPND: PPC64Opnd = PPC64Opnd::Reg(Self::EMIT_REG);
+
     /// Return an Assembler with scratch registers disabled in the backend, and a scratch register.
     pub fn new_with_scratch_reg() -> (Self, Opnd) {
         (Self::new_with_accept_scratch_reg(true), SCRATCH0_OPND)
@@ -250,6 +256,35 @@ impl Assembler {
     /// Emit platform-specific machine code
     /// Returns a list of GC offsets. Can return failure to signal caller to retry.
     fn ppc64_emit(&mut self, cb: &mut CodeBlock) -> Result<Vec<CodePtr>, CompileError> {
+        /// Emit a load from memory into a register, which zero-extends
+        /// anything narrower than the register
+        fn emit_load_mem(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
+            let PPC64Opnd::Mem(PPC64Mem { num_bits, .. }) = mem else {
+                panic!("Expected memory operand, got {mem:?}");
+            };
+            match num_bits {
+                64 => ld(cb, rt, mem),
+                32 => lwz(cb, rt, mem),
+                16 => lhz(cb, rt, mem),
+                8 => lbz(cb, rt, mem),
+                num_bits => panic!("unexpected num_bits: {num_bits}"),
+            }
+        }
+
+        /// Emit a store of the lower bits of a register to memory
+        fn emit_store_mem(cb: &mut CodeBlock, rs: PPC64Opnd, mem: PPC64Opnd) {
+            let PPC64Opnd::Mem(PPC64Mem { num_bits, .. }) = mem else {
+                panic!("Expected memory operand, got {mem:?}");
+            };
+            match num_bits {
+                64 => std(cb, rs, mem),
+                32 => stw(cb, rs, mem),
+                16 => sth(cb, rs, mem),
+                8 => stb(cb, rs, mem),
+                num_bits => panic!("unexpected num_bits: {num_bits}"),
+            }
+        }
+
         /// Emit a copy of one register to another. A copy between registers of fewer than
         /// 64 bits leaves zero in the bits above them, like on the other platforms.
         fn emit_mov_reg(cb: &mut CodeBlock, dest: &Opnd, src: &Opnd) {
@@ -262,6 +297,30 @@ impl Assembler {
             }
         }
 
+        /// Load a VALUE to a register and remember it for GC marking and reference updating
+        fn emit_load_gc_value(cb: &mut CodeBlock, gc_offsets: &mut Vec<CodePtr>, dest: PPC64Opnd, value: VALUE) {
+            // We dont need to check if it's a special const
+            // here because we only allow these operands to hit
+            // this point if they're not a special const.
+            assert!(!value.special_const_p());
+            assert_ne!(Assembler::EMIT_OPND, dest, "the load goes through dest, which r0 can't be the base of");
+
+            // This assumes only load instructions can contain
+            // references to GC'd Value operands. If the value
+            // being loaded is a heap object, we'll report that
+            // back out to the gc_offsets list.
+            //
+            // The value lives in the code, where GC can update it, and we jump
+            // over it. There is no PC-relative load, so load it through its address.
+            b(cb, 4 + (SIZEOF_VALUE as i64));
+            let value_ptr = cb.get_write_ptr();
+            cb.write_bytes(&value.as_u64().to_le_bytes());
+            gc_offsets.push(value_ptr);
+
+            emit_load_value(cb, dest, value_ptr.raw_addr(cb) as u64);
+            ld(cb, dest, PPC64Opnd::new_mem(64, dest, 0));
+        }
+
         /// Fill nops until a jump written at `last_patch_pos` can no longer reach
         /// past the current write position.
         fn emit_pad_after_patch_point(cb: &mut CodeBlock, last_patch_pos: Option<usize>) {
@@ -272,7 +331,7 @@ impl Assembler {
         }
 
         // List of GC offsets
-        let gc_offsets: Vec<CodePtr> = Vec::new();
+        let mut gc_offsets: Vec<CodePtr> = Vec::new();
 
         // Buffered list of PosMarker callbacks to fire if codegen is successful
         let mut pos_markers: Vec<(usize, CodePtr)> = vec![];
@@ -316,6 +375,52 @@ impl Assembler {
                     for _ in 0..(4 - ((text.len() + 1) % 4)) {
                         cb.write_byte(0);
                     }
+                },
+                Insn::Store { dest, src } => {
+                    // Split src into EMIT_OPND if necessary
+                    let src_reg: PPC64Opnd = match src {
+                        Opnd::Reg(_) => src.into(),
+                        // Immediates
+                        &Opnd::Imm(imm) => {
+                            emit_load_value(cb, Self::EMIT_OPND, imm as u64);
+                            Self::EMIT_OPND
+                        }
+                        &Opnd::UImm(imm) => {
+                            emit_load_value(cb, Self::EMIT_OPND, imm);
+                            Self::EMIT_OPND
+                        }
+                        // For mem-to-mem store, load the source into EMIT_OPND
+                        Opnd::Mem(Mem { base: MemBase::Reg(_), .. }) => {
+                            emit_load_mem(cb, Self::EMIT_OPND, src.into());
+                            Self::EMIT_OPND
+                        }
+                        src @ (Opnd::Mem(_) | Opnd::Value(_) | Opnd::None | Opnd::VReg { .. }) => panic!("Unexpected source operand during ppc64_emit: {src:?}")
+                    };
+
+                    emit_store_mem(cb, src_reg, dest.into());
+                },
+                Insn::Load { opnd, out } |
+                Insn::LoadInto { opnd, dest: out } => {
+                    match *opnd {
+                        Opnd::Reg(_) | Opnd::VReg { .. } => {
+                            emit_mov_reg(cb, out, opnd);
+                        },
+                        Opnd::UImm(uimm) => {
+                            emit_load_value(cb, out.into(), uimm);
+                        },
+                        Opnd::Imm(imm) => {
+                            emit_load_value(cb, out.into(), imm as u64);
+                        },
+                        Opnd::Mem(_) => {
+                            emit_load_mem(cb, out.into(), opnd.into());
+                        },
+                        Opnd::Value(value) => {
+                            emit_load_gc_value(cb, &mut gc_offsets, out.into(), value);
+                        },
+                        Opnd::None => {
+                            unreachable!("Attempted to load from None operand");
+                        }
+                    };
                 },
                 Insn::Mov { dest, src } => {
                     // ppc64_split() and ppc64_scratch_split() should have turned
@@ -631,6 +736,80 @@ mod tests {
             assert_eq!(num_insns, emit_load_value(&mut cb, R3, value));
             assert_eq!(num_insns * 4, cb.get_write_pos() - start);
         }
+    }
+
+    #[test]
+    fn test_emit_load_mem() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.load_into(Opnd::Reg(R3_REG), Opnd::mem(64, SP, 8));
+        asm.load_into(Opnd::Reg(R3_REG), Opnd::mem(32, SP, -4));
+        asm.load_into(Opnd::Reg(R3_REG), Opnd::mem(16, SP, 2));
+        asm.load_into(Opnd::Reg(R3_REG), Opnd::mem(8, SP, 1));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r3, 8(r30)
+        0x4: lwz r3, -4(r30)
+        0x8: lhz r3, 2(r30)
+        0xc: lbz r3, 1(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"08007ee8fcff7e8002007ea001007e88");
+    }
+
+    #[test]
+    fn test_store() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.store(Opnd::mem(64, SP, 8), Opnd::Reg(R3_REG));
+        asm.store(Opnd::mem(32, SP, 4), Opnd::Reg(R3_REG));
+        asm.store(Opnd::mem(16, SP, 2), Opnd::Reg(R3_REG));
+        asm.store(Opnd::mem(8, SP, 1), Opnd::Reg(R3_REG));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: std r3, 8(r30)
+        0x4: stw r3, 4(r30)
+        0x8: sth r3, 2(r30)
+        0xc: stb r3, 1(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"08007ef804007e9002007eb001007e98");
+    }
+
+    #[test]
+    fn test_store_immediate() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Immediates go through r0, even zero
+        asm.store(Opnd::mem(64, SP, 0), Opnd::UImm(0));
+        asm.store(Opnd::mem(64, SP, 8), Opnd::UImm(0x1234_5678));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r0, 0
+        0x4: std r0, 0(r30)
+        0x8: lis r0, 0x1234
+        0xc: ori r0, r0, 0x5678
+        0x10: std r0, 8(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"0000003800001ef83412003c7856006008001ef8");
+    }
+
+    #[test]
+    fn test_store_mem_to_mem() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.store(Opnd::mem(64, SP, 0), Opnd::mem(64, CFP, 8));
+        asm.store(Opnd::mem(32, SP, 8), Opnd::mem(32, CFP, 16));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r0, 8(r28)
+        0x4: std r0, 0(r30)
+        0x8: lwz r0, 0x10(r28)
+        0xc: stw r0, 8(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"08001ce800001ef810001c8008001e90");
     }
 
     #[test]
