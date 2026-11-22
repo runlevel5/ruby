@@ -103,6 +103,21 @@ impl From<&Opnd> for PPC64Opnd {
     }
 }
 
+fn emit_jmp_ptr(cb: &mut CodeBlock, dst_ptr: CodePtr) {
+    let offset = dst_ptr.as_offset() - cb.get_write_ptr().as_offset();
+
+    // If the offset is short enough, then we'll use the
+    // branch instruction. Otherwise, we'll move the
+    // destination into CTR and branch to that.
+    if b_offset_fits(offset) {
+        b(cb, offset);
+    } else {
+        emit_load_value(cb, Assembler::EMIT_OPND, dst_ptr.raw_addr(cb) as u64);
+        mtctr(cb, Assembler::EMIT_OPND);
+        bctr(cb);
+    }
+}
+
 /// Emit the required instructions to load the given value into the
 /// given register. Our goal here is to use as few instructions as
 /// possible to get this value into the register.
@@ -265,6 +280,22 @@ impl Assembler {
     /// Emit platform-specific machine code
     /// Returns a list of GC offsets. Can return failure to signal caller to retry.
     fn ppc64_emit(&mut self, cb: &mut CodeBlock) -> Result<Vec<CodePtr>, CompileError> {
+        /// Emit a b that goes to a label
+        fn emit_jmp_label(cb: &mut CodeBlock, label: Label) {
+            // Reserve space for a single b instruction
+            cb.label_ref(label, 4, |cb, src_addr, dst_addr| {
+                // src_addr is after the instruction while b
+                // counts the offset relative to its own address.
+                let offset = dst_addr - (src_addr - 4);
+                if b_offset_fits(offset) {
+                    b(cb, offset);
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            });
+        }
+
         /// Emit a load from memory into a register, which zero-extends
         /// anything narrower than the register
         fn emit_load_mem(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
@@ -481,6 +512,27 @@ impl Assembler {
                     };
                     emit_add_disp(cb, out.into(), PPC64Opnd::Reg(mem_base_reg(base_reg_no)), disp);
                 }
+                Insn::JmpOpnd(opnd) => {
+                    mtctr(cb, opnd.into());
+                    bctr(cb);
+                },
+                Insn::Jmp(target) => {
+                    match *target {
+                        Target::CodePtr(dst_ptr) => {
+                            emit_jmp_ptr(cb, dst_ptr);
+                        },
+                        Target::Label(label_idx) => {
+                            emit_jmp_label(cb, label_idx);
+                        },
+                        Target::Block(ref edge) => {
+                            let label = self.block_label(edge.target);
+                            emit_jmp_label(cb, label);
+                        },
+                        Target::SideExit(..) => {
+                            unreachable!("Target::SideExit should have been compiled by compile_exits")
+                        },
+                    };
+                },
                 Insn::PatchPoint(..) => unreachable!("PatchPoint should have been lowered to PatchPointPad in ppc64_scratch_split"),
                 Insn::PatchPointPad => {
                     emit_pad_after_patch_point(cb, last_patch_pos);
@@ -655,6 +707,33 @@ mod tests {
         let mut asm = Assembler::new();
         asm.new_block_without_id("test");
         (asm, CodeBlock::new_dummy())
+    }
+
+    fn setup_asm_with_scratch_reg() -> (Assembler, CodeBlock, Opnd) {
+        crate::options::rb_zjit_prepare_options(); // Allow `get_option!` in Assembler
+        let (mut asm, scratch_reg) = Assembler::new_with_scratch_reg();
+        asm.new_block_without_id("test");
+        (asm, CodeBlock::new_dummy(), scratch_reg)
+    }
+
+    /// Disassembly without what depends on where the code is: the offset of each
+    /// instruction, and the instructions that load an absolute address into reg
+    #[cfg(feature = "disasm")]
+    fn stable_disasm(cb: &CodeBlock, reg: &str) -> String {
+        let load_prefixes = ["li", "lis", "ori", "oris", "sldi"].map(|mnemonic| format!("{mnemonic} {reg},"));
+        let mut lines: Vec<String> = vec![];
+        for line in cb.disasm().lines() {
+            let insn = line.split_once(": ").map_or(line, |(_, insn)| insn);
+            if load_prefixes.iter().any(|prefix| insn.starts_with(prefix.as_str())) {
+                let load = format!("load {reg}, address");
+                if lines.last() != Some(&load) {
+                    lines.push(load);
+                }
+            } else {
+                lines.push(insn.to_string());
+            }
+        }
+        lines.join("\n")
     }
 
     #[test]
@@ -939,5 +1018,50 @@ mod tests {
         // have to reserve room for loading an absolute address into CTR.
         let cb = CodeBlock::new_dummy_sized(32 * 1024 * 1024 + 4);
         assert_eq!(28, cb.jmp_ptr_bytes());
+    }
+
+    #[test]
+    fn test_emit_jmp_ptr() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let target = cb.get_write_ptr().add_bytes(80);
+        asm.jmp(Target::CodePtr(target));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: b 0x50");
+        assert_snapshot!(cb.hexdump(), @"50000048");
+    }
+
+    #[test]
+    #[cfg(feature = "disasm")]
+    fn test_emit_jmp_ptr_out_of_b_range() {
+        let (mut asm, _) = setup_asm();
+        let mut cb = CodeBlock::new_dummy_sized(128 * 1024 * 1024);
+
+        let target = cb.get_write_ptr().add_bytes(1 << 26);
+        asm.jmp(Target::CodePtr(target));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        // A b can't reach 64MiB away, so the absolute address must be loaded for bctr.
+        assert!(cb.get_write_pos() <= cb.jmp_ptr_bytes());
+        assert_disasm_snapshot!(stable_disasm(&cb, "r0"), @"
+        load r0, address
+        mtctr r0
+        bctr
+        ");
+    }
+
+    #[test]
+    fn test_emit_jmp_opnd() {
+        let (mut asm, mut cb, scratch_reg) = setup_asm_with_scratch_reg();
+
+        asm.jmp_opnd(scratch_reg);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mtctr r11
+        0x4: bctr
+        ");
+        assert_snapshot!(cb.hexdump(), @"a603697d2004804e");
     }
 }
