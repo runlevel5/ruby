@@ -103,6 +103,69 @@ impl From<&Opnd> for PPC64Opnd {
     }
 }
 
+/// Emit the required instructions to load the given value into the
+/// given register. Our goal here is to use as few instructions as
+/// possible to get this value into the register.
+fn emit_load_value(cb: &mut CodeBlock, rd: PPC64Opnd, value: u64) -> usize {
+    let imm = value as i64;
+
+    if let Ok(imm) = i16::try_from(imm) {
+        // If the value fits into the sign-extended
+        // immediate of li, then we'll use that.
+        li(cb, rd, PPC64Opnd::new_imm(imm.into()));
+        1
+    } else if let Ok(imm) = i32::try_from(imm) {
+        // lis sign-extends too, and takes the upper 16 bits
+        // of a 32-bit value. ori fills in the lower 16 bits.
+        lis(cb, rd, PPC64Opnd::new_imm((imm >> 16).into()));
+        let lower = imm as u16;
+        if lower == 0 {
+            1
+        } else {
+            ori(cb, rd, rd, PPC64Opnd::new_uimm(lower.into()));
+            2
+        }
+    } else {
+        // Finally we'll fall back to loading the upper 32 bits
+        // like above, shifting them into place, and filling in
+        // the lower 32 bits 16 at a time as long as they are necessary.
+        let mut num_insns = match imm >> 32 {
+            // (0 only gets here for a value with bit 31 set, which lis would sign-extend.)
+            0 => {
+                li(cb, rd, PPC64Opnd::new_imm(0));
+                1
+            }
+            upper => {
+                let num_insns = emit_load_value(cb, rd, upper as u64);
+                sldi(cb, rd, rd, PPC64Opnd::new_uimm(32));
+                num_insns + 1
+            }
+        };
+
+        let upper = (value >> 16) as u16;
+        if upper != 0 {
+            oris(cb, rd, rd, PPC64Opnd::new_uimm(upper.into()));
+            num_insns += 1;
+        }
+
+        let lower = value as u16;
+        if lower != 0 {
+            ori(cb, rd, rd, PPC64Opnd::new_uimm(lower.into()));
+            num_insns += 1;
+        }
+        num_insns
+    }
+}
+
+/// The value of an immediate operand, if it is one
+fn imm_opnd_value(opnd: &Opnd) -> Option<i64> {
+    match *opnd {
+        Opnd::Imm(imm) => Some(imm),
+        Opnd::UImm(uimm) => Some(uimm as i64),
+        _ => None,
+    }
+}
+
 /// List of registers that can be used for register allocation.
 /// SCRATCH0_OPND, SCRATCH1_OPND, and EMIT_OPND are excluded.
 pub const ALLOC_REGS: &[Reg] = &[
@@ -255,7 +318,16 @@ impl Assembler {
                     }
                 },
                 Insn::Mov { dest, src } => {
-                    emit_mov_reg(cb, dest, src);
+                    // ppc64_split() and ppc64_scratch_split() should have turned
+                    // moves from and to memory into loads and stores.
+                    match imm_opnd_value(src) {
+                        Some(imm) => {
+                            emit_load_value(cb, dest.into(), imm as u64);
+                        },
+                        None => {
+                            emit_mov_reg(cb, dest, src);
+                        }
+                    }
                 },
                 Insn::PatchPoint(..) => unreachable!("PatchPoint should have been lowered to PatchPointPad in ppc64_scratch_split"),
                 Insn::PatchPointPad => {
@@ -459,6 +531,106 @@ mod tests {
         0x4: clrldi r3, r4, 0x20
         ");
         assert_snapshot!(cb.hexdump(), @"7823837c20008378");
+    }
+
+    #[test]
+    fn test_emit_load_value_16_bits() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x7fff));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::Imm(-0x8000));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r3, 0
+        0x4: li r3, 0x7fff
+        0x8: li r3, -0x8000
+        ");
+        assert_snapshot!(cb.hexdump(), @"00006038ff7f603800806038");
+    }
+
+    #[test]
+    fn test_emit_load_value_32_bits() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // ori isn't necessary when the lower 16 bits are zero
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1234_0000));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1234_5678));
+        // li sign-extends, so a value with bit 15 set takes lis
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x8000));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::Imm(-0x1234_5678));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: lis r3, 0x1234
+        0x4: lis r3, 0x1234
+        0x8: ori r3, r3, 0x5678
+        0xc: lis r3, 0
+        0x10: ori r3, r3, 0x8000
+        0x14: lis r3, -0x1235
+        0x18: ori r3, r3, 0xa988
+        ");
+        assert_snapshot!(cb.hexdump(), @"3412603c3412603c785663600000603c00806360cbed603c88a96360");
+    }
+
+    #[test]
+    fn test_emit_load_value_unsigned_32_bits() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // lis sign-extends, so a value with bit 31 set starts from zero
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x8000_0000));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0xffff_ffff));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r3, 0
+        0x4: oris r3, r3, 0x8000
+        0x8: li r3, 0
+        0xc: oris r3, r3, 0xffff
+        0x10: ori r3, r3, 0xffff
+        ");
+        assert_snapshot!(cb.hexdump(), @"000060380080636400006038ffff6364ffff6360");
+    }
+
+    #[test]
+    fn test_emit_load_value_64_bits() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1_0000_0000));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x7fff_1234_5678));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1234_5678_9abc_def0));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0xffff_ffff_0000_0001));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r3, 1
+        0x4: sldi r3, r3, 0x20
+        0x8: li r3, 0x7fff
+        0xc: sldi r3, r3, 0x20
+        0x10: oris r3, r3, 0x1234
+        0x14: ori r3, r3, 0x5678
+        0x18: lis r3, 0x1234
+        0x1c: ori r3, r3, 0x5678
+        0x20: sldi r3, r3, 0x20
+        0x24: oris r3, r3, 0x9abc
+        0x28: ori r3, r3, 0xdef0
+        0x2c: li r3, -1
+        0x30: sldi r3, r3, 0x20
+        0x34: ori r3, r3, 1
+        ");
+        assert_snapshot!(cb.hexdump(), @"01006038c6076378ff7f6038c607637834126364785663603412603c78566360c6076378bc9a6364f0de6360ffff6038c607637801006360");
+    }
+
+    #[test]
+    fn test_emit_load_value_num_insns() {
+        let mut cb = CodeBlock::new_dummy();
+
+        for (num_insns, value) in [(1, 0), (1, u64::MAX), (2, 0x1234_5678), (3, 0xffff_ffff), (5, 0x1234_5678_9abc_def0)] {
+            let start = cb.get_write_pos();
+            assert_eq!(num_insns, emit_load_value(&mut cb, R3, value));
+            assert_eq!(num_insns * 4, cb.get_write_pos() - start);
+        }
     }
 
     #[test]
