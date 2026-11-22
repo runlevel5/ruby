@@ -166,6 +166,15 @@ fn imm_opnd_value(opnd: &Opnd) -> Option<i64> {
     }
 }
 
+/// Split a displacement into the immediates of an addis and an addi that add it to a
+/// register. None if the displacement is so large that addis can't encode its half.
+fn split_disp(disp: i64) -> Option<(i16, i16)> {
+    // addi sign-extends its half, so the half that addis takes makes up for a negative one
+    let lower = disp as i16;
+    let upper = i16::try_from((disp - i64::from(lower)) >> 16).ok()?;
+    Some((upper, lower))
+}
+
 /// List of registers that can be used for register allocation.
 /// SCRATCH0_OPND, SCRATCH1_OPND, and EMIT_OPND are excluded.
 pub const ALLOC_REGS: &[Reg] = &[
@@ -294,6 +303,21 @@ impl Assembler {
                     let clear_bits = PPC64Opnd::new_uimm(64 - u64::from(num_bits));
                     rldicl(cb, dest.into(), src.into(), PPC64Opnd::new_uimm(0), clear_bits);
                 }
+            }
+        }
+
+        /// Do the address calculation of `out = base + disp`
+        fn emit_add_disp(cb: &mut CodeBlock, out: PPC64Opnd, base: PPC64Opnd, disp: i32) {
+            if let Ok(disp) = i16::try_from(disp) {
+                addi(cb, out, base, PPC64Opnd::new_imm(disp.into()));
+            } else if let Some((upper, lower)) = split_disp(disp.into()) {
+                addis(cb, out, base, PPC64Opnd::new_imm(upper.into()));
+                if lower != 0 {
+                    addi(cb, out, out, PPC64Opnd::new_imm(lower.into()));
+                }
+            } else {
+                emit_load_value(cb, Assembler::EMIT_OPND, disp as u64);
+                add(cb, out, base, Assembler::EMIT_OPND);
             }
         }
 
@@ -451,6 +475,12 @@ impl Assembler {
                         }
                     }
                 },
+                Insn::Lea { opnd, out } => {
+                    let &Opnd::Mem(Mem { num_bits: _, base: MemBase::Reg(base_reg_no), disp }) = opnd else {
+                        panic!("Unexpected Insn::Lea operand in ppc64_emit: {opnd:?}");
+                    };
+                    emit_add_disp(cb, out.into(), PPC64Opnd::Reg(mem_base_reg(base_reg_no)), disp);
+                }
                 Insn::PatchPoint(..) => unreachable!("PatchPoint should have been lowered to PatchPointPad in ppc64_scratch_split"),
                 Insn::PatchPointPad => {
                     emit_pad_after_patch_point(cb, last_patch_pos);
@@ -846,6 +876,40 @@ mod tests {
         0xc: stw r0, 8(r30)
         ");
         assert_snapshot!(cb.hexdump(), @"08001ce800001ef810001c8008001e90");
+    }
+
+    #[test]
+    fn test_emit_lea() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Fits in the immediate of addi
+        asm.lea_into(Opnd::Reg(R3_REG), Opnd::mem(64, SP, 0x7ff8));
+        // addis for the upper half, addi for the lower half
+        asm.lea_into(Opnd::Reg(R3_REG), Opnd::mem(64, SP, 0x12_3458));
+        // The lower half is negative, so the upper half is one more
+        asm.lea_into(Opnd::Reg(R3_REG), Opnd::mem(64, SP, 0x8000));
+        // The lower half is zero
+        asm.lea_into(Opnd::Reg(R3_REG), Opnd::mem(64, SP, -0x10000));
+        // The output register can be the base
+        asm.lea_into(SP, Opnd::mem(64, SP, -0x12_3458));
+        // Too large for addis
+        asm.lea_into(Opnd::Reg(R3_REG), Opnd::mem(64, SP, i32::MAX));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addi r3, r30, 0x7ff8
+        0x4: addis r3, r30, 0x12
+        0x8: addi r3, r3, 0x3458
+        0xc: addis r3, r30, 1
+        0x10: addi r3, r3, -0x8000
+        0x14: addis r3, r30, -1
+        0x18: addis r30, r30, -0x12
+        0x1c: addi r30, r30, -0x3458
+        0x20: lis r0, 0x7fff
+        0x24: ori r0, r0, 0xffff
+        0x28: add r3, r30, r0
+        ");
+        assert_snapshot!(cb.hexdump(), @"f87f7e3812007e3c5834633801007e3c00806338ffff7e3ceeffde3fa8cbde3bff7f003cffff006014027e7c");
     }
 
     #[test]
