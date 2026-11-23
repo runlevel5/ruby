@@ -245,6 +245,7 @@ pub const ALLOC_REGS: &[Reg] = &[
 /// They are the two volatile registers that aren't for arguments, other than r0.
 /// A call puts the address of the callee in r12, so nothing in them outlives a call.
 const SCRATCH0_OPND: Opnd = Opnd::Reg(R11_REG);
+const SCRATCH1_OPND: Opnd = Opnd::Reg(R12_REG);
 
 /// A scratch register available for use by resolve_ssa to break register copy cycles.
 /// Must not overlap with ALLOC_REGS or other preserved registers.
@@ -1059,6 +1060,20 @@ impl Assembler {
                     // from. The last patch point stays that, and the pad just gave it its room.
                     emit_pad_after_patch_point(cb, last_patch_pos);
                 },
+                Insn::IncrCounter { mem, value } => {
+                    // Try to increment the counter until nothing else has written to it between
+                    // the load and the store. Neither takes a displacement, and EMIT_OPND can't
+                    // be the base of the address, so it's the index, and the sum is in SCRATCH1_OPND.
+                    let sum: PPC64Opnd = SCRATCH1_OPND.into();
+                    li(cb, Self::EMIT_OPND, PPC64Opnd::new_imm(0));
+                    ldarx(cb, sum, mem.into(), Self::EMIT_OPND);
+                    match imm_opnd_value(value) {
+                        Some(imm) => addi(cb, sum, sum, PPC64Opnd::new_imm(imm)),
+                        None => add(cb, sum, sum, value.into()),
+                    }
+                    stdcx_dot(cb, sum, mem.into(), Self::EMIT_OPND);
+                    bc(cb, Condition::NE, -3 * 4);
+                },
                 Insn::Breakpoint => {
                     trap(cb);
                 },
@@ -1086,7 +1101,6 @@ impl Assembler {
                 Insn::CSelGE { truthy, falsy, out } => {
                     isel(cb, out.into(), truthy.into(), falsy.into(), Condition::GE);
                 }
-                insn => todo!("ppc64_emit: {insn:?}"),
             };
 
             insn_idx += 1;
@@ -2422,6 +2436,31 @@ mod tests {
         addi r1, r1, 0x60
         ");
     }
+
+    #[test]
+    fn test_incr_counter() {
+        let (mut asm, mut cb, scratch_reg) = setup_asm_with_scratch_reg();
+
+        asm.incr_counter(scratch_reg, 1.into());
+        asm.incr_counter(scratch_reg, Opnd::Reg(R3_REG));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        // Retries when the store finds that something else wrote to the counter
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r0, 0
+        0x4: ldarx r12, r11, r0
+        0x8: addi r12, r12, 1
+        0xc: stdcx. r12, r11, r0
+        0x10: bne 4
+        0x14: li r0, 0
+        0x18: ldarx r12, r11, r0
+        0x1c: add r12, r12, r3
+        0x20: stdcx. r12, r11, r0
+        0x24: bne 0x18
+        ");
+        assert_snapshot!(cb.hexdump(), @"00000038a8008b7d01008c39ad018b7df4ff824000000038a8008b7d141a8c7dad018b7df4ff8240");
+    }
+
     #[test]
     fn test_breakpoint_and_abort() {
         let (mut asm, mut cb) = setup_asm();
