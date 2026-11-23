@@ -40,6 +40,10 @@ pub const C_RET_OPND: Opnd = Opnd::Reg(R3_REG);
 pub const NATIVE_STACK_PTR: Opnd = Opnd::Reg(R1_REG);
 pub const NATIVE_BASE_PTR: Opnd = Opnd::Reg(R31_REG);
 
+/// How far a push or a pop moves the native SP, which always needs to be
+/// aligned to a 16-byte boundary
+const C_SP_STEP: i32 = 16;
+
 /// Size of the area every caller keeps at the bottom of its frame in the ELFv2 ABI:
 /// back chain, CR save, LR save and TOC save doublewords
 const LINKAGE_AREA_SIZE: i32 = 32;
@@ -272,7 +276,9 @@ impl Assembler {
 
     /// How many bytes a call and a [Self::frame_setup] would change native SP
     pub fn frame_size() -> i32 {
-        todo!("ppc64 frame layout")
+        // A call leaves room for the linkage and parameter save areas of the callee,
+        // and frame_setup pushes the base pointer and the return address
+        C_STACK_ARGS_ENTRY_OFFSET + C_SP_STEP
     }
 
     /// Split platform-specific instructions
@@ -573,6 +579,42 @@ impl Assembler {
                         cb.write_byte(0);
                     }
                 },
+                &Insn::FrameSetup { preserved, slot_count } => {
+                    const { assert!(SIZEOF_VALUE == 8, "alignment logic relies on SIZEOF_VALUE == 8"); }
+                    // Preserve r31 and the return address, which is in LR, as a pair
+                    // and set up r31 as the base pointer
+                    mflr(cb, Self::EMIT_OPND);
+                    stdu(cb, R31, PPC64Opnd::new_mem(64, R1, -C_SP_STEP));
+                    std(cb, Self::EMIT_OPND, PPC64Opnd::new_mem(64, R1, SIZEOF_VALUE_I32));
+                    mr(cb, R31, R1);
+
+                    // Preserved registers go below the base pointer, and the slots below them.
+                    // Move SP past all of them at once.
+                    let mut slot_count = slot_count + preserved.len();
+                    // Align slot_count
+                    if slot_count % 2 == 1 {
+                        slot_count += 1
+                    }
+                    if slot_count > 0 {
+                        emit_add_disp(cb, R1, R1, -((slot_count * SIZEOF_VALUE) as i32));
+                    }
+                    for (idx, reg) in preserved.iter().enumerate() {
+                        std(cb, reg.into(), PPC64Opnd::new_mem(64, R31, -(idx as i32 + 1) * SIZEOF_VALUE_I32));
+                    }
+                }
+                Insn::FrameTeardown { preserved } => {
+                    // Restore preserved registers below frame pointer.
+                    for (idx, reg) in preserved.iter().enumerate() {
+                        ld(cb, reg.into(), PPC64Opnd::new_mem(64, R31, -(idx as i32 + 1) * SIZEOF_VALUE_I32));
+                    }
+
+                    // SP = r31 (frame pointer)
+                    mr(cb, R1, R31);
+                    ld(cb, Self::EMIT_OPND, PPC64Opnd::new_mem(64, R1, SIZEOF_VALUE_I32));
+                    ld(cb, R31, PPC64Opnd::new_mem(64, R1, 0));
+                    addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
+                    mtlr(cb, Self::EMIT_OPND);
+                }
                 Insn::Add { left, right, out } => {
                     let checked = overflow_checked(insns, insn_idx);
                     match imm_opnd_value(right) {
@@ -810,6 +852,9 @@ impl Assembler {
                         let target_addr = target_code.raw_addr(cb).as_u64();
                         emit_load_value(cb, out.into(), target_addr);
                     }
+                },
+                Insn::CRet { .. } => {
+                    blr(cb);
                 },
                 Insn::Cmp { left, right } => {
                     let unsigned = compared_unsigned(insns, insn_idx);
@@ -2032,5 +2077,106 @@ mod tests {
         0x14: isel r3, r5, r4, cr0gt
         ");
         assert_snapshot!(cb.hexdump(), @"9e28647c1e28647c5e28647c9e20657c1e20657c5e20657c");
+    }
+
+    #[test]
+    fn test_emit_frame() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.frame_setup(&[]);
+        asm.frame_teardown(&[]);
+        asm.cret(C_RET_OPND);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mflr r0
+        0x4: stdu r31, -0x10(r1)
+        0x8: std r0, 8(r1)
+        0xc: mr r31, r1
+        0x10: mr r1, r31
+        0x14: ld r0, 8(r1)
+        0x18: ld r31, 0(r1)
+        0x1c: addi r1, r1, 0x10
+        0x20: mtlr r0
+        0x24: blr
+        ");
+        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7c78fbe17f080001e80000e1eb10002138a603087c2000804e");
+    }
+
+    #[test]
+    fn test_emit_frame_with_preserved_regs() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Three registers take up four slots to keep SP aligned to 16 bytes
+        asm.frame_setup(JIT_PRESERVED_REGS);
+        asm.frame_teardown(JIT_PRESERVED_REGS);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mflr r0
+        0x4: stdu r31, -0x10(r1)
+        0x8: std r0, 8(r1)
+        0xc: mr r31, r1
+        0x10: addi r1, r1, -0x20
+        0x14: std r28, -8(r31)
+        0x18: std r30, -0x10(r31)
+        0x1c: std r29, -0x18(r31)
+        0x20: ld r28, -8(r31)
+        0x24: ld r30, -0x10(r31)
+        0x28: ld r29, -0x18(r31)
+        0x2c: mr r1, r31
+        0x30: ld r0, 8(r1)
+        0x34: ld r31, 0(r1)
+        0x38: addi r1, r1, 0x10
+        0x3c: mtlr r0
+        ");
+        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7ce0ff2138f8ff9ffbf0ffdffbe8ffbffbf8ff9febf0ffdfebe8ffbfeb78fbe17f080001e80000e1eb10002138a603087c");
+    }
+
+    #[test]
+    fn test_frame_setup() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.stack_state.stack_base_idx = 16;
+        asm.frame_setup(&[]);
+        asm.compile(&mut cb).unwrap();
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mflr r0
+        0x4: stdu r31, -0x10(r1)
+        0x8: std r0, 8(r1)
+        0xc: mr r31, r1
+        0x10: addi r1, r1, -0x80
+        ");
+        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7c80ff2138");
+    }
+
+    #[test]
+    fn test_frame_setup_with_largest_frame() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // The largest frame is still within what addi can subtract
+        asm.stack_state.stack_base_idx = Assembler::MAX_FRAME_STACK_SLOTS;
+        asm.frame_setup(&[]);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mflr r0
+        0x4: stdu r31, -0x10(r1)
+        0x8: std r0, 8(r1)
+        0xc: mr r31, r1
+        0x10: addi r1, r1, -0x4000
+        ");
+        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7c00c02138");
+    }
+
+    #[test]
+    fn test_frame_setup_with_too_large_frame() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.stack_state.stack_base_idx = Assembler::MAX_FRAME_STACK_SLOTS + 1;
+        asm.frame_setup(&[]);
+
+        assert_eq!(Some(CompileError::NativeStackTooLarge), asm.compile(&mut cb).err());
     }
 }
