@@ -542,6 +542,31 @@ impl Assembler {
             addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
         }
 
+        /// Emit a call to a function at an absolute address
+        fn emit_call_ptr(cb: &mut CodeBlock, dst_addr: u64) {
+            let region_start = cb.get_ptr(0).raw_addr(cb) as u64;
+            let region_end = region_start + cb.virtual_region_size() as u64;
+
+            // A call into JIT code gets rewritten in place when the address of the callee
+            // changes, so it takes up the same room no matter what the address is.
+            let rewritable = (region_start..region_end).contains(&dst_addr);
+
+            if rewritable && cb.jmp_ptr_bytes() == 4 {
+                // Use bl when it reaches all of the code region
+                bl(cb, dst_addr as i64 - cb.get_write_ptr().raw_addr(cb) as i64);
+            } else {
+                // A C function expects its own address in r12 when called through
+                // its global entry point, to find its TOC with.
+                const LOAD_INSNS: usize = 5;
+                let load_insns = emit_load_value(cb, R12, dst_addr);
+                if rewritable {
+                    (load_insns..LOAD_INSNS).for_each(|_| nop(cb));
+                }
+                mtctr(cb, R12);
+                bctrl(cb);
+            }
+        }
+
         /// Fill nops until a jump written at `last_patch_pos` can no longer reach
         /// past the current write position.
         fn emit_pad_after_patch_point(cb: &mut CodeBlock, last_patch_pos: Option<usize>) {
@@ -901,6 +926,28 @@ impl Assembler {
                     }
                     ld(cb, opnd1.into(), PPC64Opnd::new_mem(64, R1, SIZEOF_VALUE_I32));
                     addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
+                },
+                Insn::CCall { data, .. } => {
+                    // Whatever we call saves LR, and possibly more, in the linkage area that it
+                    // expects at SP, and looks for its stack arguments above the parameter save
+                    // area. Pushes move SP, so there is no telling what is at SP. Make room for
+                    // the two areas below what has been pushed, around every call.
+                    addi(cb, R1, R1, PPC64Opnd::new_imm((-C_STACK_ARGS_ENTRY_OFFSET).into()));
+
+                    let fptr = &data.fptr;
+                    match fptr {
+                        Opnd::UImm(fptr) => {
+                            emit_call_ptr(cb, *fptr);
+                        }
+                        Opnd::Reg(_) => {
+                            mr(cb, R12, fptr.into());
+                            mtctr(cb, R12);
+                            bctrl(cb);
+                        }
+                        _ => unreachable!("unsupported ccall fptr: {fptr:?}")
+                    }
+
+                    addi(cb, R1, R1, PPC64Opnd::new_imm(C_STACK_ARGS_ENTRY_OFFSET.into()));
                 },
                 Insn::CRet { .. } => {
                     blr(cb);
@@ -2284,5 +2331,88 @@ mod tests {
         0x10: addi r1, r1, 0x10
         ");
         assert_snapshot!(cb.hexdump(), @"000081e8080061e810002138080061e810002138");
+    }
+
+    #[test]
+    fn test_ccall() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // SP moves past the linkage and parameter save areas for the callee,
+        // and r12 has the address of the callee
+        asm.ccall(0x1234_5678 as _, vec![]);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addi r1, r1, -0x60
+        0x4: lis r12, 0x1234
+        0x8: ori r12, r12, 0x5678
+        0xc: mtctr r12
+        0x10: bctrl
+        0x14: addi r1, r1, 0x60
+        ");
+        assert_snapshot!(cb.hexdump(), @"a0ff21383412803d78568c61a603897d2104804e60002138");
+    }
+
+    #[test]
+    fn test_ccall_reg() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let _ = asm.ccall_reg(C_ARG_OPNDS[2], VALUE_BITS);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addi r1, r1, -0x60
+        0x4: mr r12, r5
+        0x8: mtctr r12
+        0xc: bctrl
+        0x10: addi r1, r1, 0x60
+        ");
+        assert_snapshot!(cb.hexdump(), @"a0ff2138782bac7ca603897d2104804e60002138");
+    }
+
+    #[test]
+    fn test_ccall_jit_code() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // bl reaches anywhere in a code region this small, and JIT code has no use for r12
+        let target = cb.get_write_ptr().add_bytes(0x100);
+        asm.ccall(target.raw_ptr(&cb), vec![]);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addi r1, r1, -0x60
+        0x4: bl 0x100
+        0x8: addi r1, r1, 0x60
+        ");
+        assert_snapshot!(cb.hexdump(), @"a0ff2138fd00004860002138");
+    }
+
+    #[test]
+    #[cfg(feature = "disasm")]
+    fn test_ccall_jit_code_in_large_region() {
+        // A call into JIT code takes up the same room no matter the address,
+        // so that rewriting it with another address fits
+        let code_size = |target_offset: usize| {
+            let (mut asm, _) = setup_asm();
+            let mut cb = CodeBlock::new_dummy_sized(128 * 1024 * 1024);
+            let target = cb.get_write_ptr().add_bytes(target_offset);
+            asm.ccall(target.raw_ptr(&cb), vec![]);
+            asm.compile_with_num_regs(&mut cb, 0);
+            (cb.get_write_pos(), stable_disasm(&cb, "r12").replace("nop\n", ""))
+        };
+
+        let (near_size, near_disasm) = code_size(0);
+        let (far_size, far_disasm) = code_size(1 << 26);
+        assert_eq!(near_size, far_size);
+        // addi, 5 instructions for the address, mtctr, bctrl, addi
+        assert_eq!(9 * 4, near_size);
+        assert_eq!(near_disasm, far_disasm);
+        assert_disasm_snapshot!(near_disasm, @"
+        addi r1, r1, -0x60
+        load r12, address
+        mtctr r12
+        bctrl
+        addi r1, r1, 0x60
+        ");
     }
 }
