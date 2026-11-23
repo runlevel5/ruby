@@ -1059,6 +1059,13 @@ impl Assembler {
                     // from. The last patch point stays that, and the pad just gave it its room.
                     emit_pad_after_patch_point(cb, last_patch_pos);
                 },
+                Insn::Breakpoint => {
+                    trap(cb);
+                },
+                Insn::Abort => {
+                    // All zeros is an illegal instruction
+                    cb.write_bytes(&[0; 4]);
+                },
                 Insn::CSelZ { truthy, falsy, out } |
                 Insn::CSelE { truthy, falsy, out } => {
                     isel(cb, out.into(), truthy.into(), falsy.into(), Condition::EQ);
@@ -2414,5 +2421,19 @@ mod tests {
         bctrl
         addi r1, r1, 0x60
         ");
+    }
+    #[test]
+    fn test_breakpoint_and_abort() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.breakpoint();
+        asm.abort();
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: trap
+        0x4: .byte 0x00, 0x00, 0x00, 0x00
+        ");
+        assert_snapshot!(cb.hexdump(), @"0800e07f00000000");
     }
 }
