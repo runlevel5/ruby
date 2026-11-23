@@ -595,6 +595,16 @@ impl Assembler {
                     }
                     emit_truncate_result(cb, out);
                 },
+                Insn::Mul { left, right, out } => {
+                    // If the next instruction is JoMul
+                    if overflow_checked(insns, insn_idx) {
+                        emit_clear_overflow(cb);
+                        mulldo_dot(cb, out.into(), left.into(), right.into());
+                    } else {
+                        mulld(cb, out.into(), left.into(), right.into());
+                    }
+                    emit_truncate_result(cb, out);
+                },
                 Insn::Store { dest, src } => {
                     // Split src into EMIT_OPND if necessary
                     let src_reg: PPC64Opnd = match src {
@@ -1565,5 +1575,28 @@ mod tests {
         0x28: nop
         ");
         assert_snapshot!(cb.hexdump(), @"00000038a603017c5124657c200083410000006000000038a603017c010000385124607c0800834100000060");
+    }
+
+    #[test]
+    fn test_emit_mul() {
+        let (mut asm, mut cb) = setup_asm();
+        let overflow = asm.new_label("overflow");
+
+        asm.push_insn(Insn::Mul { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        // (.byte is mulldo.)
+        asm.push_insn(Insn::Mul { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::JoMul(overflow.clone()));
+        asm.write_label(overflow);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mulld r3, r4, r5
+        0x4: li r0, 0
+        0x8: mtxer r0
+        0xc: .byte 0xd3, 0x2d, 0x64, 0x7c
+        0x10: bso 0x18
+        0x14: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"d229647c00000038a603017cd32d647c0800834100000060");
     }
 }
