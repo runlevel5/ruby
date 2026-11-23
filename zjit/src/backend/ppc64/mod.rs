@@ -834,6 +834,24 @@ impl Assembler {
                         }
                     }
                 },
+                Insn::Test { left, right } => {
+                    // Only CR0 is of interest, so the result goes to EMIT_OPND to be discarded
+                    match imm_opnd_value(right) {
+                        Some(imm) if u16::try_from(imm).is_ok() => {
+                            andi_dot(cb, Self::EMIT_OPND, left.into(), PPC64Opnd::new_imm(imm));
+                        }
+                        _ => {
+                            let right = emit_reg_or_imm(cb, right);
+                            if left.rm_num_bits() == 32 {
+                                // and. would compare all 64 bits of the result with zero
+                                and(cb, Self::EMIT_OPND, left.into(), right);
+                                cmpwi(cb, Self::EMIT_OPND, PPC64Opnd::new_imm(0));
+                            } else {
+                                and_dot(cb, Self::EMIT_OPND, left.into(), right);
+                            }
+                        }
+                    }
+                },
                 Insn::JmpOpnd(opnd) => {
                     mtctr(cb, opnd.into());
                     bctr(cb);
@@ -1935,5 +1953,39 @@ mod tests {
         0x14: nop
         ");
         assert_snapshot!(cb.hexdump(), @"0020037cfcff80410000006001000328f0ff804100000060");
+    }
+
+    #[test]
+    fn test_emit_test() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.test(Opnd::Reg(R3_REG), Opnd::Reg(R4_REG));
+        asm.test(Opnd::Reg(R3_REG), Opnd::UImm(7));
+        // An immediate that andi. can't encode goes through r0
+        asm.test(Opnd::Reg(R3_REG), Opnd::Imm(-8));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: and. r0, r3, r4
+        0x4: andi. r0, r3, 7
+        0x8: li r0, -8
+        0xc: and. r0, r3, r0
+        ");
+        assert_snapshot!(cb.hexdump(), @"3920607c07006070f8ff00383900607c");
+    }
+
+    #[test]
+    fn test_emit_test_32_bits() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // and. would set CR0 from all 64 bits of the result
+        asm.test(Opnd::Reg(R3_REG).with_num_bits(32), Opnd::Reg(R4_REG).with_num_bits(32));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: and r0, r3, r4
+        0x4: cmpwi r0, 0
+        ");
+        assert_snapshot!(cb.hexdump(), @"3820607c0000002c");
     }
 }
