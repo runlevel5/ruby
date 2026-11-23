@@ -192,6 +192,12 @@ fn imm_opnd_value(opnd: &Opnd) -> Option<i64> {
     }
 }
 
+/// Whether a load or a store can encode the displacement of a memory operand
+fn mem_disp_fits(num_bits: u8, disp: i32) -> bool {
+    // ld and std, which move 64 bits, only take a multiple of 4
+    i16::try_from(disp).is_ok() && (num_bits != 64 || disp % 4 == 0)
+}
+
 /// Split a displacement into the immediates of an addis and an addi that add it to a
 /// register. None if the displacement is so large that addis can't encode its half.
 fn split_disp(disp: i64) -> Option<(i16, i16)> {
@@ -287,9 +293,175 @@ impl Assembler {
     /// stages of the compilation pipeline.
     /// Here we may want to make sure that all instructions (except load and store)
     /// have no memory operands.
-    fn ppc64_split(self) -> Assembler {
-        // TODO: split instructions
-        self
+    fn ppc64_split(mut self) -> Assembler
+    {
+        /// When you're storing a register into a memory location or loading a
+        /// memory location into a register, the displacement from the base
+        /// register of the memory location must fit into 16 bits. If it doesn't,
+        /// then we need to load that memory address into a register first.
+        fn split_memory_address(asm: &mut Assembler, opnd: Opnd) -> Opnd {
+            match opnd {
+                Opnd::Mem(mem) => {
+                    if mem_disp_fits(mem.num_bits, mem.disp) {
+                        opnd
+                    } else if asm.accept_scratch_reg {
+                        asm.lea_into(SCRATCH1_OPND, Opnd::Mem(Mem { num_bits: 64, ..mem }));
+                        Opnd::mem(mem.num_bits, SCRATCH1_OPND, 0)
+                    } else {
+                        let base = asm.lea(Opnd::Mem(Mem { num_bits: 64, ..mem }));
+                        Opnd::mem(mem.num_bits, base, 0)
+                    }
+                },
+                _ => unreachable!("Can only split memory addresses.")
+            }
+        }
+
+        /// Any memory operands you're sending into an Op::Load instruction need
+        /// to be split in case their displacement doesn't fit into 16 bits.
+        fn split_load_operand(asm: &mut Assembler, opnd: Opnd) -> Opnd {
+            match opnd {
+                Opnd::Reg(_) | Opnd::VReg { .. } => opnd,
+                Opnd::Mem(_) => {
+                    let split_opnd = split_memory_address(asm, opnd);
+                    let out_opnd = asm.load(split_opnd);
+                    // Only cmp tells 32-bit operands from 64-bit ones. asm.load with fewer
+                    // bits zero-extends the value, so it's safe to recognize it as a 32-bit value.
+                    if out_opnd.rm_num_bits() < 32 {
+                        out_opnd.with_num_bits(32)
+                    } else {
+                        out_opnd
+                    }
+                },
+                _ => asm.load(opnd)
+            }
+        }
+
+        /// The second operand of an instruction can stay an immediate of any size.
+        /// ppc64_emit loads one that the instruction can't encode into EMIT_OPND,
+        /// so it only needs a register when it comes from memory.
+        fn split_reg_or_imm(asm: &mut Assembler, opnd: Opnd) -> Opnd {
+            match opnd {
+                Opnd::Mem(_) => split_load_operand(asm, opnd),
+                _ => opnd
+            }
+        }
+
+        let mut asm_local = Assembler::new_with_asm(&self);
+        let mut iterator = self.instruction_iterator();
+        let asm = &mut asm_local;
+
+        while let Some((_index, mut insn)) = iterator.next(asm) {
+            // Here we're going to map the operands of the instruction to load
+            // any Opnd::Value operands into registers if they are heap objects
+            // such that only the Op::Load instruction needs to handle that
+            // case. If the values aren't heap objects then we'll treat them as
+            // if they were just unsigned integer.
+            let is_load = matches!(insn, Insn::Load { .. } | Insn::LoadInto { .. });
+            let is_jump = insn.is_jump();
+
+            insn.for_each_operand_mut(|opnd| {
+                if let Opnd::Value(value) = opnd {
+                    if value.special_const_p() {
+                        *opnd = Opnd::UImm(value.as_u64());
+                    } else if !is_load && !is_jump {
+                        *opnd = asm.load(*opnd);
+                    }
+                };
+            });
+
+            // We are replacing instructions here so we know they are already
+            // being used. It is okay not to use their output here.
+            #[allow(unused_must_use)]
+            match &mut insn {
+                Insn::CRet(opnd) => {
+                    match opnd {
+                        // If the value is already in the return register, then
+                        // we don't need to do anything.
+                        Opnd::Reg(C_RET_REG) => {},
+
+                        // If the value is a memory address, we need to first
+                        // make sure the displacement isn't too large and then
+                        // load it into the return register.
+                        Opnd::Mem(_) => {
+                            let split = split_memory_address(asm, *opnd);
+                            asm.load_into(C_RET_OPND, split);
+                        },
+
+                        // Otherwise we just need to load the value into the
+                        // return register.
+                        _ => {
+                            asm.load_into(C_RET_OPND, *opnd);
+                        }
+                    }
+                    asm.cret(C_RET_OPND);
+                },
+                Insn::JmpOpnd(opnd) => {
+                    if let Opnd::Mem(_) = opnd {
+                        let opnd0 = split_load_operand(asm, *opnd);
+                        asm.jmp_opnd(opnd0);
+                    } else {
+                        asm.jmp_opnd(*opnd);
+                    }
+                },
+                Insn::Load { opnd, .. } |
+                Insn::LoadInto { opnd, .. } => {
+                    *opnd = match opnd {
+                        Opnd::Mem(_) => split_memory_address(asm, *opnd),
+                        _ => *opnd
+                    };
+                    asm.push_insn(insn);
+                },
+                Insn::LoadSExt { opnd, out } => {
+                    match opnd {
+                        // We only want to sign extend if the operand is a
+                        // register, instruction output, or memory address that
+                        // is 32 bits. Otherwise we'll just load the value
+                        // directly since there's no need to sign extend.
+                        Opnd::Reg(Reg { num_bits: 32, .. }) |
+                        Opnd::VReg { num_bits: 32, .. } |
+                        Opnd::Mem(Mem { num_bits: 32, .. }) => {
+                            asm.push_insn(insn);
+                        },
+                        _ => {
+                            asm.push_insn(Insn::Load { opnd: *opnd, out: *out });
+                        }
+                    };
+                },
+                Insn::Mov { dest, src } => {
+                    match (&dest, &src) {
+                        // If we're attempting to load into a memory operand, then
+                        // we'll switch over to the store instruction.
+                        (Opnd::Mem(_), _) => {
+                            let opnd0 = split_memory_address(asm, *dest);
+                            let value = split_reg_or_imm(asm, *src);
+                            asm.store(opnd0, value);
+                        },
+                        // If we're loading a memory operand into a register, then
+                        // we'll switch over to the load instruction.
+                        (Opnd::Reg(_) | Opnd::VReg { .. }, Opnd::Mem(_)) => {
+                            let value = split_memory_address(asm, *src);
+                            asm.load_into(*dest, value);
+                        },
+                        // Otherwise we'll use the normal mov instruction.
+                        (Opnd::Reg(_), _) => {
+                            asm.mov(*dest, *src);
+                        },
+                        _ => unreachable!("unexpected combination of operands in Insn::Mov: {dest:?}, {src:?}")
+                    };
+                },
+                Insn::Store { dest, .. } => {
+                    if asm.accept_scratch_reg && matches!(dest, Opnd::Mem(_)) {
+                        *dest = split_memory_address(asm, *dest);
+                    }
+                    asm.push_insn(insn);
+                },
+                _ => {
+                    asm.push_insn(insn);
+                }
+            }
+        }
+
+        asm_local
     }
 
     /// Split instructions using scratch registers. To maximize the use of the register pool for
@@ -2474,5 +2646,67 @@ mod tests {
         0x4: .byte 0x00, 0x00, 0x00, 0x00
         ");
         assert_snapshot!(cb.hexdump(), @"0800e07f00000000");
+    }
+    #[test]
+    fn test_split_mov_to_and_from_memory() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.mov(Opnd::Reg(R3_REG), Opnd::mem(64, SP, 8));
+        asm.mov(Opnd::mem(64, SP, 16), Opnd::Reg(R3_REG));
+        asm.mov(Opnd::mem(64, SP, 24), Opnd::UImm(1));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r3, 8(r30)
+        0x4: std r3, 0x10(r30)
+        0x8: li r0, 1
+        0xc: std r0, 0x18(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"08007ee810007ef80100003818001ef8");
+    }
+
+    #[test]
+    fn test_split_load_with_large_displacement() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // The displacement doesn't fit in 16 bits, so the address is calculated first
+        let value = asm.load(Opnd::mem(64, SP, 0x12_3458));
+        asm.store(Opnd::mem(64, CFP, 0), value);
+        // ld can't encode a displacement that isn't a multiple of 4
+        let value = asm.load(Opnd::mem(64, SP, 6));
+        asm.store(Opnd::mem(64, CFP, 0), value);
+        // lbz can
+        let value = asm.load(Opnd::mem(8, SP, 6));
+        asm.store(Opnd::mem(8, CFP, 0), value);
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addis r3, r30, 0x12
+        0x4: addi r3, r3, 0x3458
+        0x8: ld r3, 0(r3)
+        0xc: std r3, 0(r28)
+        0x10: addi r3, r30, 6
+        0x14: ld r3, 0(r3)
+        0x18: std r3, 0(r28)
+        0x1c: lbz r3, 6(r30)
+        0x20: stb r3, 0(r28)
+        ");
+        assert_snapshot!(cb.hexdump(), @"12007e3c58346338000063e800007cf806007e38000063e800007cf806007e8800007c98");
+    }
+
+    #[test]
+    fn test_store_with_scratch_reg_and_large_displacement() {
+        let (mut asm, mut cb, scratch_reg) = setup_asm_with_scratch_reg();
+
+        // With no scratch split to come, the address goes to the other scratch register
+        asm.store(Opnd::mem(64, scratch_reg, 0x12_3458), Opnd::Reg(R3_REG));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addis r12, r11, 0x12
+        0x4: addi r12, r12, 0x3458
+        0x8: std r3, 0(r12)
+        ");
+        assert_snapshot!(cb.hexdump(), @"12008b3d58348c3900006cf8");
     }
 }
