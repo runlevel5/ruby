@@ -205,6 +205,24 @@ fn overflow_checked(insns: &[Insn], insn_idx: usize) -> bool {
         .is_some_and(|insn| matches!(insn, Insn::Jo(_) | Insn::JoMul(_)))
 }
 
+/// Whether the instruction that reads the outcome of the Cmp at insn_idx is for unsigned
+/// integers. The two kinds of comparison set the same CR bits, so unlike on the other
+/// platforms, it's the Cmp that has to know which one it is.
+fn compared_unsigned(insns: &[Insn], insn_idx: usize) -> bool {
+    for insn in &insns[insn_idx + 1..] {
+        match insn {
+            Insn::Jb(_) | Insn::Jbe(_) => return true,
+            Insn::Je(_) | Insn::Jne(_) | Insn::Jz(_) | Insn::Jnz(_) |
+            Insn::Jl(_) | Insn::Jg(_) | Insn::Jge(_) |
+            Insn::CSelZ { .. } | Insn::CSelNZ { .. } | Insn::CSelE { .. } | Insn::CSelNE { .. } |
+            Insn::CSelL { .. } | Insn::CSelLE { .. } | Insn::CSelG { .. } | Insn::CSelGE { .. } |
+            Insn::Cmp { .. } | Insn::Test { .. } => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// List of registers that can be used for register allocation.
 /// SCRATCH0_OPND, SCRATCH1_OPND, and EMIT_OPND are excluded.
 pub const ALLOC_REGS: &[Reg] = &[
@@ -791,6 +809,29 @@ impl Assembler {
                         let target_code = target.unwrap_code_ptr();
                         let target_addr = target_code.raw_addr(cb).as_u64();
                         emit_load_value(cb, out.into(), target_addr);
+                    }
+                },
+                Insn::Cmp { left, right } => {
+                    let unsigned = compared_unsigned(insns, insn_idx);
+                    let doubleword = left.rm_num_bits() == 64;
+                    match (imm_opnd_value(right), unsigned) {
+                        (Some(imm), false) if i16::try_from(imm).is_ok() => {
+                            let imm = PPC64Opnd::new_imm(imm);
+                            if doubleword { cmpdi(cb, left.into(), imm) } else { cmpwi(cb, left.into(), imm) }
+                        }
+                        (Some(imm), true) if u16::try_from(imm).is_ok() => {
+                            let imm = PPC64Opnd::new_imm(imm);
+                            if doubleword { cmpldi(cb, left.into(), imm) } else { cmplwi(cb, left.into(), imm) }
+                        }
+                        _ => {
+                            let right = emit_reg_or_imm(cb, right);
+                            match (unsigned, doubleword) {
+                                (false, true) => cmpd(cb, left.into(), right),
+                                (false, false) => cmpw(cb, left.into(), right),
+                                (true, true) => cmpld(cb, left.into(), right),
+                                (true, false) => cmplw(cb, left.into(), right),
+                            }
+                        }
                     }
                 },
                 Insn::JmpOpnd(opnd) => {
@@ -1808,5 +1849,91 @@ mod tests {
         0x20: lhbrx r3, r1, r0
         ");
         assert_snapshot!(cb.hexdump(), @"f8ff81f8f8ff00382804617cf8ff81f8f8ff00382c04617cf8ff81f8f8ff00382c06617c");
+    }
+
+    #[test]
+    fn test_emit_cmp_signed() {
+        let (mut asm, mut cb) = setup_asm();
+        let label = asm.new_label("label");
+
+        asm.write_label(label.clone());
+        asm.cmp(Opnd::Reg(R3_REG), Opnd::Reg(R4_REG));
+        asm.push_insn(Insn::Jl(label.clone()));
+        asm.cmp(Opnd::Reg(R3_REG), Opnd::Imm(-1));
+        asm.push_insn(Insn::Jge(label.clone()));
+        // An immediate that cmpdi can't encode goes through r0
+        asm.cmp(Opnd::Reg(R3_REG), Opnd::UImm(0x8000));
+        asm.jg(label.clone());
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: cmpd r3, r4
+        0x4: blt 0
+        0x8: nop
+        0xc: cmpdi r3, -1
+        0x10: bge 0
+        0x14: nop
+        0x18: lis r0, 0
+        0x1c: ori r0, r0, 0x8000
+        0x20: cmpd r3, r0
+        0x24: bgt 0
+        0x28: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"0020237cfcff804100000060ffff232cf0ff8040000000600000003c008000600000237cdcff814100000060");
+    }
+
+    #[test]
+    fn test_emit_cmp_unsigned() {
+        let (mut asm, mut cb) = setup_asm();
+        let label = asm.new_label("label");
+
+        // The jump after the cmp tells that the comparison is unsigned
+        asm.write_label(label.clone());
+        asm.cmp(Opnd::Reg(R3_REG), Opnd::Reg(R4_REG));
+        asm.jb(label.clone());
+        asm.cmp(Opnd::Reg(R3_REG), Opnd::UImm(0xffff));
+        asm.push_insn(Insn::Jbe(label.clone()));
+        // An immediate that cmpldi can't encode goes through r0
+        asm.cmp(Opnd::Reg(R3_REG), Opnd::Imm(-1));
+        asm.jb(label.clone());
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: cmpld r3, r4
+        0x4: blt 0
+        0x8: nop
+        0xc: cmpldi r3, 0xffff
+        0x10: ble 0
+        0x14: nop
+        0x18: li r0, -1
+        0x1c: cmpld r3, r0
+        0x20: blt 0
+        0x24: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"4020237cfcff804100000060ffff2328f0ff814000000060ffff00384000237ce0ff804100000060");
+    }
+
+    #[test]
+    fn test_emit_cmp_32_bits() {
+        let (mut asm, mut cb) = setup_asm();
+        let label = asm.new_label("label");
+
+        let (left, right) = (Opnd::Reg(R3_REG).with_num_bits(32), Opnd::Reg(R4_REG).with_num_bits(32));
+        asm.write_label(label.clone());
+        asm.cmp(left, right);
+        asm.push_insn(Insn::Jl(label.clone()));
+        asm.cmp(left, Opnd::UImm(1));
+        asm.jb(label.clone());
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: cmpw r3, r4
+        0x4: blt 0
+        0x8: nop
+        0xc: cmplwi r3, 1
+        0x10: blt 0
+        0x14: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"0020037cfcff80410000006001000328f0ff804100000060");
     }
 }
