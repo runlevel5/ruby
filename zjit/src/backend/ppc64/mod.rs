@@ -678,6 +678,19 @@ impl Assembler {
                     }
                     emit_truncate_result(cb, out);
                 },
+                Insn::ByteSwap { opnd, out } => {
+                    // Before ISA 3.1, only a load can reverse bytes. Go through the doubleword
+                    // below SP, which the ABI lets us use for as long as we don't make a call.
+                    const SWAP_DISP: i32 = -SIZEOF_VALUE_I32;
+                    std(cb, opnd.into(), PPC64Opnd::new_mem(64, R1, SWAP_DISP));
+                    li(cb, Self::EMIT_OPND, PPC64Opnd::new_imm(SWAP_DISP.into()));
+                    match opnd.rm_num_bits() {
+                        64 => ldbrx(cb, out.into(), R1, Self::EMIT_OPND),
+                        32 => lwbrx(cb, out.into(), R1, Self::EMIT_OPND),
+                        16 => lhbrx(cb, out.into(), R1, Self::EMIT_OPND),
+                        num_bits => panic!("unexpected num_bits: {num_bits}"),
+                    }
+                },
                 Insn::Store { dest, src } => {
                     // Split src into EMIT_OPND if necessary
                     let src_reg: PPC64Opnd = match src {
@@ -1770,5 +1783,30 @@ mod tests {
         0x10: nop
         ");
         assert_snapshot!(cb.hexdump(), @"00000038a603017c1526647c0800834100000060");
+    }
+
+    #[test]
+    fn test_byteswap() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Stored below SP and loaded back with the bytes reversed
+        for num_bits in [64, 32, 16] {
+            let opnd = Opnd::Reg(R4_REG).with_num_bits(num_bits);
+            asm.push_insn(Insn::ByteSwap { opnd, out: Opnd::Reg(R3_REG).with_num_bits(num_bits) });
+        }
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: std r4, -8(r1)
+        0x4: li r0, -8
+        0x8: ldbrx r3, r1, r0
+        0xc: std r4, -8(r1)
+        0x10: li r0, -8
+        0x14: lwbrx r3, r1, r0
+        0x18: std r4, -8(r1)
+        0x1c: li r0, -8
+        0x20: lhbrx r3, r1, r0
+        ");
+        assert_snapshot!(cb.hexdump(), @"f8ff81f8f8ff00382804617cf8ff81f8f8ff00382c04617cf8ff81f8f8ff00382c06617c");
     }
 }
