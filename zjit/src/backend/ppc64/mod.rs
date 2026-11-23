@@ -605,6 +605,46 @@ impl Assembler {
                     }
                     emit_truncate_result(cb, out);
                 },
+                Insn::And { left, right, out } => {
+                    match imm_opnd_value(right) {
+                        Some(imm) if u16::try_from(imm).is_ok() => {
+                            andi_dot(cb, out.into(), left.into(), PPC64Opnd::new_imm(imm));
+                        }
+                        _ => {
+                            let right = emit_reg_or_imm(cb, right);
+                            and(cb, out.into(), left.into(), right);
+                        }
+                    }
+                    emit_truncate_result(cb, out);
+                },
+                Insn::Or { left, right, out } => {
+                    match imm_opnd_value(right) {
+                        Some(imm) if u16::try_from(imm).is_ok() => {
+                            ori(cb, out.into(), left.into(), PPC64Opnd::new_imm(imm));
+                        }
+                        _ => {
+                            let right = emit_reg_or_imm(cb, right);
+                            or(cb, out.into(), left.into(), right);
+                        }
+                    }
+                    emit_truncate_result(cb, out);
+                },
+                Insn::Xor { left, right, out } => {
+                    match imm_opnd_value(right) {
+                        Some(imm) if u16::try_from(imm).is_ok() => {
+                            xori(cb, out.into(), left.into(), PPC64Opnd::new_imm(imm));
+                        }
+                        _ => {
+                            let right = emit_reg_or_imm(cb, right);
+                            xor(cb, out.into(), left.into(), right);
+                        }
+                    }
+                    emit_truncate_result(cb, out);
+                },
+                Insn::Not { opnd, out } => {
+                    not(cb, out.into(), opnd.into());
+                    emit_truncate_result(cb, out);
+                },
                 Insn::Store { dest, src } => {
                     // Split src into EMIT_OPND if necessary
                     let src_reg: PPC64Opnd = match src {
@@ -1598,5 +1638,59 @@ mod tests {
         0x14: nop
         ");
         assert_snapshot!(cb.hexdump(), @"d229647c00000038a603017cd32d647c0800834100000060");
+    }
+
+    #[test]
+    fn test_emit_and_or_xor() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let (out, left, right) = (Opnd::Reg(R3_REG), Opnd::Reg(R4_REG), Opnd::Reg(R5_REG));
+        asm.push_insn(Insn::And { left, right, out });
+        asm.push_insn(Insn::Or { left, right, out });
+        asm.push_insn(Insn::Xor { left, right, out });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: and r3, r4, r5
+        0x4: or r3, r4, r5
+        0x8: xor r3, r4, r5
+        ");
+        assert_snapshot!(cb.hexdump(), @"3828837c782b837c782a837c");
+    }
+
+    #[test]
+    fn test_emit_and_or_xor_with_immediate() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let (out, left) = (Opnd::Reg(R3_REG), Opnd::Reg(R4_REG));
+        asm.push_insn(Insn::And { left, right: Opnd::UImm(0xffff), out });
+        asm.push_insn(Insn::Or { left, right: Opnd::UImm(1), out });
+        asm.push_insn(Insn::Xor { left, right: Opnd::UImm(0x14), out });
+        // These take unsigned 16-bit immediates. Anything else goes through r0.
+        asm.push_insn(Insn::And { left, right: Opnd::Imm(-8), out });
+        asm.push_insn(Insn::Or { left, right: Opnd::UImm(0x1_0000), out });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: andi. r3, r4, 0xffff
+        0x4: ori r3, r4, 1
+        0x8: xori r3, r4, 0x14
+        0xc: li r0, -8
+        0x10: and r3, r4, r0
+        0x14: lis r0, 1
+        0x18: or r3, r4, r0
+        ");
+        assert_snapshot!(cb.hexdump(), @"ffff83700100836014008368f8ff00383800837c0100003c7803837c");
+    }
+
+    #[test]
+    fn test_emit_not() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.push_insn(Insn::Not { opnd: Opnd::Reg(R4_REG), out: Opnd::Reg(R3_REG) });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: nor r3, r4, r4");
+        assert_snapshot!(cb.hexdump(), @"f820837c");
     }
 }
