@@ -918,6 +918,26 @@ impl Assembler {
                     // from. The last patch point stays that, and the pad just gave it its room.
                     emit_pad_after_patch_point(cb, last_patch_pos);
                 },
+                Insn::CSelZ { truthy, falsy, out } |
+                Insn::CSelE { truthy, falsy, out } => {
+                    isel(cb, out.into(), truthy.into(), falsy.into(), Condition::EQ);
+                },
+                Insn::CSelNZ { truthy, falsy, out } |
+                Insn::CSelNE { truthy, falsy, out } => {
+                    isel(cb, out.into(), truthy.into(), falsy.into(), Condition::NE);
+                },
+                Insn::CSelL { truthy, falsy, out } => {
+                    isel(cb, out.into(), truthy.into(), falsy.into(), Condition::LT);
+                },
+                Insn::CSelLE { truthy, falsy, out } => {
+                    isel(cb, out.into(), truthy.into(), falsy.into(), Condition::LE);
+                },
+                Insn::CSelG { truthy, falsy, out } => {
+                    isel(cb, out.into(), truthy.into(), falsy.into(), Condition::GT);
+                },
+                Insn::CSelGE { truthy, falsy, out } => {
+                    isel(cb, out.into(), truthy.into(), falsy.into(), Condition::GE);
+                }
                 insn => todo!("ppc64_emit: {insn:?}"),
             };
 
@@ -1987,5 +2007,30 @@ mod tests {
         0x4: cmpwi r0, 0
         ");
         assert_snapshot!(cb.hexdump(), @"3820607c0000002c");
+    }
+
+    #[test]
+    fn test_emit_csel() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let (truthy, falsy, out) = (Opnd::Reg(R4_REG), Opnd::Reg(R5_REG), Opnd::Reg(R3_REG));
+        asm.push_insn(Insn::CSelE { truthy, falsy, out });
+        asm.push_insn(Insn::CSelL { truthy, falsy, out });
+        asm.push_insn(Insn::CSelG { truthy, falsy, out });
+        // isel only picks its first operand when a CR bit is set, so these swap them
+        asm.push_insn(Insn::CSelNE { truthy, falsy, out });
+        asm.push_insn(Insn::CSelGE { truthy, falsy, out });
+        asm.push_insn(Insn::CSelLE { truthy, falsy, out });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: isel r3, r4, r5, cr0eq
+        0x4: isel r3, r4, r5, cr0lt
+        0x8: isel r3, r4, r5, cr0gt
+        0xc: isel r3, r5, r4, cr0eq
+        0x10: isel r3, r5, r4, cr0lt
+        0x14: isel r3, r5, r4, cr0gt
+        ");
+        assert_snapshot!(cb.hexdump(), @"9e28647c1e28647c5e28647c9e20657c1e20657c5e20657c");
     }
 }
