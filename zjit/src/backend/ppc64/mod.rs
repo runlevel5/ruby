@@ -524,6 +524,24 @@ impl Assembler {
             }
         }
 
+        /// Return the register to store for a push. No register reads as zero in
+        /// a store, so a zero immediate is loaded into EMIT_OPND first.
+        fn emit_push_operand(cb: &mut CodeBlock, opnd: &Opnd) -> PPC64Opnd {
+            match opnd {
+                Opnd::UImm(0) | Opnd::Imm(0) => {
+                    li(cb, Assembler::EMIT_OPND, PPC64Opnd::new_imm(0));
+                    Assembler::EMIT_OPND
+                }
+                _ => opnd.into(),
+            }
+        }
+
+        /// Pop a value from the stack by loading `[sp]` then adding to the stack pointer.
+        fn emit_pop(cb: &mut CodeBlock, opnd: PPC64Opnd) {
+            ld(cb, opnd, PPC64Opnd::new_mem(64, R1, 0));
+            addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
+        }
+
         /// Fill nops until a jump written at `last_patch_pos` can no longer reach
         /// past the current write position.
         fn emit_pad_after_patch_point(cb: &mut CodeBlock, last_patch_pos: Option<usize>) {
@@ -852,6 +870,37 @@ impl Assembler {
                         let target_addr = target_code.raw_addr(cb).as_u64();
                         emit_load_value(cb, out.into(), target_addr);
                     }
+                },
+                Insn::CPush(opnd) => {
+                    // Push a value to the stack by storing below the stack pointer and moving
+                    // it there, leaving an 8-byte gap for alignment.
+                    stdu(cb, opnd.into(), PPC64Opnd::new_mem(64, R1, -C_SP_STEP));
+                },
+                Insn::CPushPair(opnd0, opnd1) => {
+                    // Second operand ends up at the lower stack address
+                    if let Some(opnd0) = opnd0 {
+                        let first_push = emit_push_operand(cb, opnd0);
+                        std(cb, first_push, PPC64Opnd::new_mem(64, R1, -SIZEOF_VALUE_I32));
+                    }
+                    // With no first operand, write only the lower slot while
+                    // still reserving the pair.
+                    let second_push = emit_push_operand(cb, opnd1);
+                    stdu(cb, second_push, PPC64Opnd::new_mem(64, R1, -C_SP_STEP));
+                },
+                Insn::CPop { out } => {
+                    emit_pop(cb, out.into());
+                },
+                Insn::CPopInto(opnd) => {
+                    emit_pop(cb, opnd.into());
+                },
+                Insn::CPopPairInto(opnd0, opnd1) => {
+                    // First operand is popped from the lower stack address.
+                    // The second one wins when they are the same register.
+                    if opnd0 != opnd1 {
+                        ld(cb, opnd0.into(), PPC64Opnd::new_mem(64, R1, 0));
+                    }
+                    ld(cb, opnd1.into(), PPC64Opnd::new_mem(64, R1, SIZEOF_VALUE_I32));
+                    addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
                 },
                 Insn::CRet { .. } => {
                     blr(cb);
@@ -2178,5 +2227,62 @@ mod tests {
         asm.frame_setup(&[]);
 
         assert_eq!(Some(CompileError::NativeStackTooLarge), asm.compile(&mut cb).err());
+    }
+
+    #[test]
+    fn test_cpush_cpop() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.cpush(Opnd::Reg(R3_REG));
+        asm.cpop_into(Opnd::Reg(R3_REG));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: stdu r3, -0x10(r1)
+        0x4: ld r3, 0(r1)
+        0x8: addi r1, r1, 0x10
+        ");
+        assert_snapshot!(cb.hexdump(), @"f1ff61f8000061e810002138");
+    }
+
+    #[test]
+    fn test_cpush_pair() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.cpush_pair(Opnd::Reg(R3_REG), Opnd::Reg(R4_REG));
+        // No register reads as zero in a store, so zero goes through r0
+        asm.push_insn(Insn::CPushPair(Some(Opnd::Reg(R3_REG)), 0.into()));
+        // Only the lower slot is written
+        asm.push_insn(Insn::CPushPair(None, Opnd::Reg(R4_REG)));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: std r3, -8(r1)
+        0x4: stdu r4, -0x10(r1)
+        0x8: std r3, -8(r1)
+        0xc: li r0, 0
+        0x10: stdu r0, -0x10(r1)
+        0x14: stdu r4, -0x10(r1)
+        ");
+        assert_snapshot!(cb.hexdump(), @"f8ff61f8f1ff81f8f8ff61f800000038f1ff01f8f1ff81f8");
+    }
+
+    #[test]
+    fn test_cpop_pair_into() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.cpop_pair_into(Opnd::Reg(R4_REG), Opnd::Reg(R3_REG));
+        // Popping a pair into one register leaves the upper slot in it
+        asm.cpop_pair_into(Opnd::Reg(R3_REG), Opnd::Reg(R3_REG));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r4, 0(r1)
+        0x4: ld r3, 8(r1)
+        0x8: addi r1, r1, 0x10
+        0xc: ld r3, 8(r1)
+        0x10: addi r1, r1, 0x10
+        ");
+        assert_snapshot!(cb.hexdump(), @"000081e8080061e810002138080061e810002138");
     }
 }
