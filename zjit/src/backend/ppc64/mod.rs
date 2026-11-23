@@ -645,6 +645,39 @@ impl Assembler {
                     not(cb, out.into(), opnd.into());
                     emit_truncate_result(cb, out);
                 },
+                Insn::RShift { opnd, shift, out } => {
+                    // A value of 32 bits has zero above them, so it needs its sign back first
+                    let opnd = if opnd.rm_num_bits() == 32 {
+                        extsw(cb, out.into(), opnd.into());
+                        out
+                    } else {
+                        opnd
+                    };
+                    match imm_opnd_value(shift) {
+                        Some(shift) => sradi(cb, out.into(), opnd.into(), PPC64Opnd::new_imm(shift)),
+                        None => srad(cb, out.into(), opnd.into(), shift.into()),
+                    }
+                    emit_truncate_result(cb, out);
+                },
+                Insn::URShift { opnd, shift, out } => {
+                    match imm_opnd_value(shift) {
+                        Some(shift) => srdi(cb, out.into(), opnd.into(), PPC64Opnd::new_imm(shift)),
+                        None => srd(cb, out.into(), opnd.into(), shift.into()),
+                    }
+                },
+                Insn::LShift { opnd, shift, out } => {
+                    match imm_opnd_value(shift) {
+                        // No shift records overflow. Shifting by one bit is
+                        // adding the value to itself, which can.
+                        Some(1) if overflow_checked(insns, insn_idx) => {
+                            emit_clear_overflow(cb);
+                            addo_dot(cb, out.into(), opnd.into(), opnd.into());
+                        }
+                        Some(shift) => sldi(cb, out.into(), opnd.into(), PPC64Opnd::new_imm(shift)),
+                        None => sld(cb, out.into(), opnd.into(), shift.into()),
+                    }
+                    emit_truncate_result(cb, out);
+                },
                 Insn::Store { dest, src } => {
                     // Split src into EMIT_OPND if necessary
                     let src_reg: PPC64Opnd = match src {
@@ -1692,5 +1725,50 @@ mod tests {
 
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: nor r3, r4, r4");
         assert_snapshot!(cb.hexdump(), @"f820837c");
+    }
+
+    #[test]
+    fn test_emit_shifts() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let (out, opnd) = (Opnd::Reg(R3_REG), Opnd::Reg(R4_REG));
+        asm.push_insn(Insn::LShift { opnd, shift: Opnd::UImm(3), out });
+        asm.push_insn(Insn::RShift { opnd, shift: Opnd::UImm(3), out });
+        asm.push_insn(Insn::URShift { opnd, shift: Opnd::UImm(3), out });
+        asm.push_insn(Insn::LShift { opnd, shift: Opnd::Reg(R5_REG), out });
+        asm.push_insn(Insn::RShift { opnd, shift: Opnd::Reg(R5_REG), out });
+        asm.push_insn(Insn::URShift { opnd, shift: Opnd::Reg(R5_REG), out });
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: sldi r3, r4, 3
+        0x4: sradi r3, r4, 3
+        0x8: rldicl r3, r4, 0x3d, 3
+        0xc: sld r3, r4, r5
+        0x10: srad r3, r4, r5
+        0x14: srd r3, r4, r5
+        ");
+        assert_snapshot!(cb.hexdump(), @"241f8378741e837cc2e883783628837c342e837c362c837c");
+    }
+
+    #[test]
+    fn test_emit_lshift_with_overflow_check() {
+        let (mut asm, mut cb) = setup_asm();
+        let overflow = asm.new_label("overflow");
+
+        // Shifting left by one bit is adding the value to itself. (.byte is addo.)
+        asm.push_insn(Insn::LShift { opnd: Opnd::Reg(R4_REG), shift: Opnd::UImm(1), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.write_label(overflow);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r0, 0
+        0x4: mtxer r0
+        0x8: .byte 0x15, 0x26, 0x64, 0x7c
+        0xc: bso 0x14
+        0x10: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"00000038a603017c1526647c0800834100000060");
     }
 }
