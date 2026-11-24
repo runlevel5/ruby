@@ -346,6 +346,35 @@ impl Assembler {
             }
         }
 
+        /// Returns the operands that should be used for an isel instruction.
+        fn split_csel_operands(asm: &mut Assembler, opnd0: Opnd, opnd1: Opnd) -> (Opnd, Opnd) {
+            let opnd0 = match opnd0 {
+                Opnd::Reg(_) | Opnd::VReg { .. } => opnd0,
+                _ => split_load_operand(asm, opnd0)
+            };
+
+            let opnd1 = match opnd1 {
+                Opnd::Reg(_) | Opnd::VReg { .. } => opnd1,
+                _ => split_load_operand(asm, opnd1)
+            };
+
+            (opnd0, opnd1)
+        }
+
+        fn split_less_than_32_cmp(asm: &mut Assembler, opnd0: Opnd) -> Opnd {
+            match opnd0 {
+                Opnd::Reg(_) | Opnd::VReg { .. } => {
+                    match opnd0.rm_num_bits() {
+                        8 => asm.and(opnd0.with_num_bits(64), Opnd::UImm(0xff)),
+                        16 => asm.and(opnd0.with_num_bits(64), Opnd::UImm(0xffff)),
+                        32 | 64 => opnd0,
+                        bits => unreachable!("Invalid number of bits. {}", bits)
+                    }
+                }
+                _ => opnd0
+            }
+        }
+
         let mut asm_local = Assembler::new_with_asm(&self);
         let mut iterator = self.instruction_iterator();
         let asm = &mut asm_local;
@@ -398,6 +427,19 @@ impl Assembler {
                     *right = split_reg_or_imm(asm, *right);
                     asm.push_insn(insn);
                 }
+                Insn::Cmp { left, right } => {
+                    let opnd0 = split_load_operand(asm, *left);
+                    let opnd0 = split_less_than_32_cmp(asm, opnd0);
+                    let split_right = split_reg_or_imm(asm, *right);
+                    let opnd1 = match split_right {
+                        Opnd::VReg { .. } if opnd0.num_bits() != split_right.num_bits() => {
+                            split_right.with_num_bits(opnd0.num_bits().unwrap())
+                        },
+                        _ => split_right
+                    };
+
+                    asm.cmp(opnd0, opnd1);
+                },
                 Insn::CRet(opnd) => {
                     match opnd {
                         // If the value is already in the return register, then
@@ -419,6 +461,19 @@ impl Assembler {
                         }
                     }
                     asm.cret(C_RET_OPND);
+                },
+                Insn::CSelZ { truthy, falsy, .. } |
+                Insn::CSelNZ { truthy, falsy, .. } |
+                Insn::CSelE { truthy, falsy, .. } |
+                Insn::CSelNE { truthy, falsy, .. } |
+                Insn::CSelL { truthy, falsy, .. } |
+                Insn::CSelLE { truthy, falsy, .. } |
+                Insn::CSelG { truthy, falsy, .. } |
+                Insn::CSelGE { truthy, falsy, .. } => {
+                    let (opnd0, opnd1) = split_csel_operands(asm, *truthy, *falsy);
+                    *truthy = opnd0;
+                    *falsy = opnd1;
+                    asm.push_insn(insn);
                 },
                 Insn::JmpOpnd(opnd) => {
                     if let Opnd::Mem(_) = opnd {
@@ -502,6 +557,13 @@ impl Assembler {
                     *left = split_load_operand(asm, *left);
                     *right = split_load_operand(asm, *right);
                     asm.push_insn(insn);
+                },
+                Insn::Test { left, right } => {
+                    // The value being tested must be in a register, so if it's
+                    // not already one we'll load it first.
+                    let opnd0 = split_load_operand(asm, *left);
+                    let opnd1 = split_reg_or_imm(asm, *right);
+                    asm.test(opnd0, opnd1);
                 },
                 _ => {
                     asm.push_insn(insn);
@@ -2781,6 +2843,40 @@ mod tests {
         0x20: stb r3, 0(r28)
         ");
         assert_snapshot!(cb.hexdump(), @"12007e3c58346338000063e800007cf806007e38000063e800007cf806007e8800007c98");
+    }
+
+    #[test]
+    fn test_split_cmp_8_bits() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Only the lower 8 bits of the register are compared
+        asm.cmp(Opnd::Reg(R5_REG).with_num_bits(8), Opnd::UImm(0xc));
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: andi. r3, r5, 0xff
+        0x4: cmpdi r3, 0xc
+        ");
+        assert_snapshot!(cb.hexdump(), @"ff00a3700c00232c");
+    }
+
+    #[test]
+    fn test_split_csel_immediates() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.cmp(Opnd::Reg(R5_REG), Opnd::UImm(0));
+        let out = asm.csel_e(Opnd::UImm(0x14), Opnd::UImm(0));
+        asm.store(Opnd::mem(64, SP, 0), out);
+        asm.compile_with_num_regs(&mut cb, 2);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: cmpdi r5, 0
+        0x4: li r3, 0x14
+        0x8: li r4, 0
+        0xc: isel r3, r3, r4, cr0eq
+        0x10: std r3, 0(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"0000252c14006038000080389e20637c00007ef8");
     }
 
     #[test]
