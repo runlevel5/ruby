@@ -2894,4 +2894,98 @@ mod tests {
         ");
         assert_snapshot!(cb.hexdump(), @"12008b3d58348c3900006cf8");
     }
+
+    #[test]
+    fn test_ccall_resolve_parallel_moves_single_cycle() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // r3 and r4 swap, which takes the scratch register
+        asm.ccall(0 as _, vec![C_ARG_OPNDS[1], C_ARG_OPNDS[0]]);
+        asm.compile_with_num_regs(&mut cb, ALLOC_REGS.len());
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: mr r11, r3
+        0x4: mr r3, r4
+        0x8: mr r4, r11
+        0xc: addi r1, r1, -0x60
+        0x10: li r12, 0
+        0x14: mtctr r12
+        0x18: bctrl
+        0x1c: addi r1, r1, 0x60
+        ");
+        assert_snapshot!(cb.hexdump(), @"781b6b7c7823837c785b647da0ff213800008039a603897d2104804e60002138");
+    }
+
+    #[test]
+    fn test_ccall_register_preservation() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Three values live across the call, which are pushed in pairs
+        let v0 = asm.load(1.into());
+        let v1 = asm.load(2.into());
+        let v2 = asm.load(3.into());
+        asm.ccall(0 as _, vec![]);
+        asm.store(Opnd::mem(64, SP, 0), v0);
+        asm.store(Opnd::mem(64, SP, 8), v1);
+        asm.store(Opnd::mem(64, SP, 16), v2);
+        asm.compile_with_num_regs(&mut cb, ALLOC_REGS.len());
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r3, 1
+        0x4: li r4, 2
+        0x8: li r5, 3
+        0xc: std r3, -8(r1)
+        0x10: stdu r4, -0x10(r1)
+        0x14: std r5, -8(r1)
+        0x18: li r0, 0
+        0x1c: stdu r0, -0x10(r1)
+        0x20: addi r1, r1, -0x60
+        0x24: li r12, 0
+        0x28: mtctr r12
+        0x2c: bctrl
+        0x30: addi r1, r1, 0x60
+        0x34: ld r5, 8(r1)
+        0x38: addi r1, r1, 0x10
+        0x3c: ld r4, 0(r1)
+        0x40: ld r3, 8(r1)
+        0x44: addi r1, r1, 0x10
+        0x48: std r3, 0(r30)
+        0x4c: std r4, 8(r30)
+        0x50: std r5, 0x10(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"01006038020080380300a038f8ff61f8f1ff81f8f8ffa1f800000038f1ff01f8a0ff213800008039a603897d2104804e600021380800a1e810002138000081e8080061e81000213800007ef808009ef81000bef8");
+    }
+
+    #[test]
+    fn test_ccall_stack_args() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // 9 arguments: 8 in registers, 1 on the stack. It is pushed with padding to keep SP
+        // aligned to 16 bytes, and ends up right above the parameter save area of the callee.
+        let a0 = asm.load(Opnd::UImm(1));
+        let mut args: Vec<Opnd> = (2..=8).map(|i| asm.load(Opnd::UImm(i))).collect();
+        args.insert(0, a0);
+        args.push(a0);
+        asm.ccall(0 as _, args);
+        asm.compile_with_num_regs(&mut cb, ALLOC_REGS.len());
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: li r3, 1
+        0x4: li r4, 2
+        0x8: li r5, 3
+        0xc: li r6, 4
+        0x10: li r7, 5
+        0x14: li r8, 6
+        0x18: li r9, 7
+        0x1c: li r10, 8
+        0x20: stdu r3, -0x10(r1)
+        0x24: addi r1, r1, -0x60
+        0x28: li r12, 0
+        0x2c: mtctr r12
+        0x30: bctrl
+        0x34: addi r1, r1, 0x60
+        0x38: addi r1, r1, 0x10
+        ");
+        assert_snapshot!(cb.hexdump(), @"01006038020080380300a0380400c0380500e038060000390700203908004039f1ff61f8a0ff213800008039a603897d2104804e6000213810002138");
+    }
 }
