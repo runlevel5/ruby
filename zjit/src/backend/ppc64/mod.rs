@@ -580,6 +580,64 @@ impl Assembler {
     /// splits them and uses scratch registers for it.
     /// Linearizes all blocks into a single giant block.
     fn ppc64_scratch_split(self) -> Assembler {
+        /// If opnd is Opnd::Mem with a too large disp, make the disp smaller using lea.
+        fn split_large_disp(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
+            match opnd {
+                Opnd::Mem(Mem { num_bits, disp, .. }) if !mem_disp_fits(num_bits, disp) => {
+                    asm.lea_into(scratch_opnd, opnd);
+                    Opnd::mem(num_bits, scratch_opnd, 0)
+                }
+                _ => opnd,
+            }
+        }
+
+        /// If opnd is Opnd::Mem with MemBase::Stack, lower it to Opnd::Mem with MemBase::Reg, and split a large disp.
+        fn split_stack_membase(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
+            let opnd = split_only_stack_membase(asm, opnd, scratch_opnd);
+            split_large_disp(asm, opnd, scratch_opnd)
+        }
+
+        /// split_stack_membase but without split_large_disp. This should be used only by lea,
+        /// whose lowering already handles large displacements in ppc64_emit.
+        fn split_only_stack_membase(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
+            match opnd {
+                Opnd::Mem(Mem { base: stack_membase @ MemBase::Stack { .. }, disp: opnd_disp, num_bits: opnd_num_bits }) => {
+                    // Convert MemBase::Stack to MemBase::Reg(NATIVE_BASE_PTR) with the
+                    // correct stack displacement. The stack slot value lives directly at
+                    // [NATIVE_BASE_PTR + stack_disp], so we just adjust the base and
+                    // combine displacements -- no indirection needed. Large
+                    // displacements are handled by split_stack_membase().
+                    let Mem { base, disp: stack_disp, .. } = asm.stack_state.stack_membase_to_mem(stack_membase);
+                    Opnd::Mem(Mem { base, disp: stack_disp + opnd_disp, num_bits: opnd_num_bits })
+                }
+                Opnd::Mem(Mem { base: MemBase::StackIndirect { stack_idx }, disp: opnd_disp, num_bits: opnd_num_bits }) => {
+                    // The spilled value (a pointer) lives at a stack slot. Load it
+                    // into a scratch register, then use the register as the base.
+                    let stack_mem = asm.stack_state.stack_membase_to_mem(MemBase::Stack { stack_idx, num_bits: 64 });
+                    let stack_opnd = split_large_disp(asm, Opnd::Mem(stack_mem), scratch_opnd);
+                    asm.load_into(scratch_opnd, stack_opnd);
+                    Opnd::Mem(Mem {
+                        base: MemBase::Reg(scratch_opnd.unwrap_reg().reg_no),
+                        disp: opnd_disp,
+                        num_bits: opnd_num_bits,
+                    })
+                }
+                _ => opnd,
+            }
+        }
+
+        /// Lower what a store writes into something ppc64_emit can put in EMIT_OPND, which
+        /// can't be the base that the load of a heap object goes through.
+        fn split_store_source(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
+            match opnd {
+                Opnd::Value(value) if !value.special_const_p() => {
+                    asm.load_into(scratch_opnd, opnd);
+                    scratch_opnd
+                }
+                _ => split_stack_membase(asm, opnd, scratch_opnd),
+            }
+        }
+
         let mut asm_local = Assembler::new_with_asm_without_blocks(&self);
         asm_local.accept_scratch_reg = true;
 
@@ -591,9 +649,48 @@ impl Assembler {
         // Get linearized instructions with branch parameters expanded into ParallelMov
         let linearized_insns = self.linearize_instructions();
 
-        // TODO: split instructions
-        for insn in linearized_insns {
-            asm.push_insn(insn);
+        // Process each linearized instruction
+        for insn in linearized_insns.iter() {
+            let mut insn = insn.clone();
+            match &mut insn {
+                Insn::Load { opnd, out } |
+                Insn::LoadInto { opnd, dest: out } => {
+                    *out = split_stack_membase(asm, *out, SCRATCH1_OPND);
+
+                    if let Opnd::Mem(_) = out {
+                        *opnd = split_store_source(asm, *opnd, SCRATCH0_OPND);
+                        asm.store(*out, *opnd);
+                    } else {
+                        *opnd = split_stack_membase(asm, *opnd, SCRATCH0_OPND);
+                        // If in and out are the same, this is a redundant mov
+                        if opnd != out {
+                            asm.push_insn(insn);
+                        }
+                    }
+                }
+                Insn::Store { dest, src } => {
+                    *dest = split_stack_membase(asm, *dest, SCRATCH0_OPND);
+                    *src = split_store_source(asm, *src, SCRATCH1_OPND);
+                    asm.push_insn(insn);
+                }
+                Insn::Mov { dest, src } => {
+                    *dest = split_stack_membase(asm, *dest, SCRATCH1_OPND);
+                    match dest {
+                        Opnd::Reg(_) => {
+                            *src = split_stack_membase(asm, *src, SCRATCH0_OPND);
+                            asm.load_into(*dest, *src);
+                        }
+                        Opnd::Mem(_) => {
+                            *src = split_store_source(asm, *src, SCRATCH0_OPND);
+                            asm.store(*dest, *src);
+                        }
+                        _ => asm.push_insn(insn),
+                    }
+                }
+                _ => {
+                    asm.push_insn(insn);
+                }
+            }
         }
 
         asm_local
@@ -2987,5 +3084,28 @@ mod tests {
         0x38: addi r1, r1, 0x10
         ");
         assert_snapshot!(cb.hexdump(), @"01006038020080380300a0380400c0380500e038060000390700203908004039f1ff61f8a0ff213800008039a603897d2104804e6000213810002138");
+    }
+
+    #[test]
+    fn test_scratch_split_spilled_values() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // With one register for two values, one of them lives on the stack.
+        // Storing it is a load into r0 and a store.
+        let v0 = asm.load(Opnd::mem(64, SP, 0));
+        let v1 = asm.load(Opnd::mem(64, SP, 8));
+        asm.store(Opnd::mem(64, SP, 16), v0);
+        asm.store(Opnd::mem(64, SP, 24), v1);
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r3, 0(r30)
+        0x4: ld r0, 8(r30)
+        0x8: std r0, -8(r31)
+        0xc: std r3, 0x10(r30)
+        0x10: ld r0, -8(r31)
+        0x14: std r0, 0x18(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"00007ee808001ee8f8ff1ff810007ef8f8ff1fe818001ef8");
     }
 }
