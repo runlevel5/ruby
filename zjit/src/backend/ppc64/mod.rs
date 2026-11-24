@@ -373,6 +373,31 @@ impl Assembler {
             // being used. It is okay not to use their output here.
             #[allow(unused_must_use)]
             match &mut insn {
+                Insn::Add { left, right, .. } |
+                Insn::And { left, right, .. } |
+                Insn::Or { left, right, .. } |
+                Insn::Xor { left, right, .. } => {
+                    match (*left, *right) {
+                        // When one operand is a register, legalize the other operand
+                        // into possibly an immediate and swap the order if necessary.
+                        // Only the rhs can be an immediate, but these are commutative.
+                        (reg_opnd @ (Opnd::Reg(_) | Opnd::VReg { .. }), other_opnd) |
+                        (other_opnd, reg_opnd @ (Opnd::Reg(_) | Opnd::VReg { .. })) => {
+                            *left = reg_opnd;
+                            *right = split_reg_or_imm(asm, other_opnd);
+                        }
+                        _ => {
+                            *left = split_load_operand(asm, *left);
+                            *right = split_reg_or_imm(asm, *right);
+                        }
+                    }
+                    asm.push_insn(insn);
+                }
+                Insn::Sub { left, right, .. } => {
+                    *left = split_load_operand(asm, *left);
+                    *right = split_reg_or_imm(asm, *right);
+                    asm.push_insn(insn);
+                }
                 Insn::CRet(opnd) => {
                     match opnd {
                         // If the value is already in the return register, then
@@ -449,10 +474,33 @@ impl Assembler {
                         _ => unreachable!("unexpected combination of operands in Insn::Mov: {dest:?}, {src:?}")
                     };
                 },
+                Insn::Not { opnd, .. } => {
+                    // The value that is being negated must be in a register, so
+                    // if we get anything else we need to load it first.
+                    *opnd = match opnd {
+                        Opnd::Mem(_) => split_load_operand(asm, *opnd),
+                        _ => *opnd
+                    };
+                    asm.push_insn(insn);
+                },
+                Insn::LShift { opnd, .. } |
+                Insn::RShift { opnd, .. } |
+                Insn::URShift { opnd, .. } |
+                Insn::ByteSwap { opnd, .. } => {
+                    // The operand must be in a register, so
+                    // if we get anything else we need to load it first.
+                    *opnd = split_load_operand(asm, *opnd);
+                    asm.push_insn(insn);
+                },
                 Insn::Store { dest, .. } => {
                     if asm.accept_scratch_reg && matches!(dest, Opnd::Mem(_)) {
                         *dest = split_memory_address(asm, *dest);
                     }
+                    asm.push_insn(insn);
+                },
+                Insn::Mul { left, right, .. } => {
+                    *left = split_load_operand(asm, *left);
+                    *right = split_load_operand(asm, *right);
                     asm.push_insn(insn);
                 },
                 _ => {
@@ -2647,6 +2695,47 @@ mod tests {
         ");
         assert_snapshot!(cb.hexdump(), @"0800e07f00000000");
     }
+
+    #[test]
+    fn test_split_memory_operands() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Both operands are loaded into registers first
+        let sum = asm.add(Opnd::mem(64, SP, 0), Opnd::mem(64, SP, 8));
+        asm.store(Opnd::mem(64, SP, 16), sum);
+        asm.compile_with_num_regs(&mut cb, 2);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r3, 0(r30)
+        0x4: ld r4, 8(r30)
+        0x8: add r3, r3, r4
+        0xc: std r3, 0x10(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"00007ee808009ee81422637c10007ef8");
+    }
+
+    #[test]
+    fn test_split_immediate_on_the_left() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // Addition is commutative, so the immediate becomes the second operand
+        let sum = asm.add(Opnd::UImm(8), Opnd::Reg(R4_REG));
+        asm.store(Opnd::mem(64, SP, 0), sum);
+        // Subtraction isn't, so the immediate is loaded
+        let difference = asm.sub(Opnd::UImm(8), Opnd::Reg(R4_REG));
+        asm.store(Opnd::mem(64, SP, 8), difference);
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: addi r3, r4, 8
+        0x4: std r3, 0(r30)
+        0x8: li r3, 8
+        0xc: subf r3, r4, r3
+        0x10: std r3, 8(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"0800643800007ef8080060385018647c08007ef8");
+    }
+
     #[test]
     fn test_split_mov_to_and_from_memory() {
         let (mut asm, mut cb) = setup_asm();
