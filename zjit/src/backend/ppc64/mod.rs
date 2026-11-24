@@ -626,6 +626,18 @@ impl Assembler {
             }
         }
 
+        /// If opnd is Opnd::Mem, lower it to scratch_opnd. You should use this when `opnd` is read by the instruction, not written.
+        fn split_memory_read(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
+            if let Opnd::Mem(_) = opnd {
+                let opnd = split_stack_membase(asm, opnd, scratch_opnd);
+                let scratch_opnd = opnd.num_bits().map(|num_bits| scratch_opnd.with_num_bits(num_bits)).unwrap_or(scratch_opnd);
+                asm.load_into(scratch_opnd, opnd);
+                scratch_opnd
+            } else {
+                opnd
+            }
+        }
+
         /// Lower what a store writes into something ppc64_emit can put in EMIT_OPND, which
         /// can't be the base that the load of a heap object goes through.
         fn split_store_source(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
@@ -635,6 +647,17 @@ impl Assembler {
                     scratch_opnd
                 }
                 _ => split_stack_membase(asm, opnd, scratch_opnd),
+            }
+        }
+
+        /// If opnd is Opnd::Mem, set scratch_reg to *opnd. Return Some(Opnd::Mem) if it needs to be written back from scratch_reg.
+        fn split_memory_write(opnd: &mut Opnd, scratch_opnd: Opnd) -> Option<Opnd> {
+            if let Opnd::Mem(_) = opnd {
+                let mem_opnd = *opnd;
+                *opnd = opnd.num_bits().map(|num_bits| scratch_opnd.with_num_bits(num_bits)).unwrap_or(scratch_opnd);
+                Some(mem_opnd)
+            } else {
+                None
             }
         }
 
@@ -653,6 +676,63 @@ impl Assembler {
         for insn in linearized_insns.iter() {
             let mut insn = insn.clone();
             match &mut insn {
+                Insn::Add { left, right, out } |
+                Insn::Sub { left, right, out } |
+                Insn::Mul { left, right, out } |
+                Insn::And { left, right, out } |
+                Insn::Or { left, right, out } |
+                Insn::Xor { left, right, out } |
+                Insn::CSelZ  { truthy: left, falsy: right, out } |
+                Insn::CSelNZ { truthy: left, falsy: right, out } |
+                Insn::CSelE  { truthy: left, falsy: right, out } |
+                Insn::CSelNE { truthy: left, falsy: right, out } |
+                Insn::CSelL  { truthy: left, falsy: right, out } |
+                Insn::CSelLE { truthy: left, falsy: right, out } |
+                Insn::CSelG  { truthy: left, falsy: right, out } |
+                Insn::CSelGE { truthy: left, falsy: right, out } => {
+                    *left = split_memory_read(asm, *left, SCRATCH0_OPND);
+                    *right = split_memory_read(asm, *right, SCRATCH1_OPND);
+                    let mem_out = split_memory_write(out, SCRATCH0_OPND);
+
+                    asm.push_insn(insn);
+
+                    if let Some(mem_out) = mem_out {
+                        let mem_out = split_stack_membase(asm, mem_out, SCRATCH1_OPND);
+                        asm.store(mem_out, SCRATCH0_OPND);
+                    }
+                }
+                Insn::Not { opnd, out } |
+                Insn::ByteSwap { opnd, out } |
+                Insn::LShift { opnd, out, .. } |
+                Insn::RShift { opnd, out, .. } |
+                Insn::URShift { opnd, out, .. } => {
+                    *opnd = split_memory_read(asm, *opnd, SCRATCH0_OPND);
+                    let mem_out = split_memory_write(out, SCRATCH0_OPND);
+
+                    asm.push_insn(insn);
+
+                    if let Some(mem_out) = mem_out {
+                        let mem_out = split_stack_membase(asm, mem_out, SCRATCH1_OPND);
+                        asm.store(mem_out, SCRATCH0_OPND);
+                    }
+                }
+                Insn::Cmp { left, right } |
+                Insn::Test { left, right } => {
+                    *left = split_memory_read(asm, *left, SCRATCH0_OPND);
+                    *right = split_memory_read(asm, *right, SCRATCH1_OPND);
+                    asm.push_insn(insn);
+                }
+                Insn::Lea { opnd, out } => {
+                    *opnd = split_only_stack_membase(asm, *opnd, SCRATCH0_OPND);
+                    let mem_out = split_memory_write(out, SCRATCH0_OPND);
+
+                    asm.push_insn(insn);
+
+                    if let Some(mem_out) = mem_out {
+                        let mem_out = split_stack_membase(asm, mem_out, SCRATCH1_OPND);
+                        asm.store(mem_out, SCRATCH0_OPND);
+                    }
+                }
                 Insn::Load { opnd, out } |
                 Insn::LoadInto { opnd, dest: out } => {
                     *out = split_stack_membase(asm, *out, SCRATCH1_OPND);
@@ -3107,5 +3187,90 @@ mod tests {
         0x14: std r0, 0x18(r30)
         ");
         assert_snapshot!(cb.hexdump(), @"00007ee808001ee8f8ff1ff810007ef8f8ff1fe818001ef8");
+    }
+
+    #[test]
+    fn test_scratch_split_spilled_operands() {
+        let (mut asm, mut cb) = setup_asm();
+
+        // With one register for three values, two of them live on the stack
+        // and go through the scratch registers
+        let v0 = asm.load(Opnd::mem(64, SP, 0));
+        let v1 = asm.load(Opnd::mem(64, SP, 8));
+        let v2 = asm.load(Opnd::mem(64, SP, 16));
+        let sum = asm.add(v0, v1);
+        let sum = asm.add(sum, v2);
+        asm.store(Opnd::mem(64, SP, 24), sum);
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r3, 0(r30)
+        0x4: ld r0, 8(r30)
+        0x8: std r0, -8(r31)
+        0xc: ld r0, 0x10(r30)
+        0x10: std r0, -0x10(r31)
+        0x14: ld r12, -8(r31)
+        0x18: add r3, r3, r12
+        0x1c: ld r12, -0x10(r31)
+        0x20: add r3, r3, r12
+        0x24: std r3, 0x18(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"00007ee808001ee8f8ff1ff810001ee8f0ff1ff8f8ff9fe91462637cf0ff9fe91462637c18007ef8");
+    }
+
+    #[test]
+    fn test_scratch_split_spilled_lshift() {
+        let (mut asm, mut cb) = setup_asm();
+
+        let v0 = asm.load(Opnd::mem(64, SP, 0));
+        let v1 = asm.load(Opnd::mem(64, SP, 8));
+        let shifted = asm.lshift(v1, Opnd::UImm(3));
+        asm.store(Opnd::mem(64, SP, 16), v0);
+        asm.store(Opnd::mem(64, SP, 24), shifted);
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r0, 0(r30)
+        0x4: std r0, -8(r31)
+        0x8: ld r3, 8(r30)
+        0xc: sldi r3, r3, 3
+        0x10: ld r0, -8(r31)
+        0x14: std r0, 0x10(r30)
+        0x18: std r3, 0x18(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"00001ee8f8ff1ff808007ee8241f6378f8ff1fe810001ef818007ef8");
+    }
+
+    #[test]
+    fn test_scratch_split_spilled_overflow_check() {
+        let (mut asm, mut cb) = setup_asm();
+        let overflow = asm.new_label("overflow");
+
+        // The sum is stored to its stack slot between the addition and the jump.
+        // (.byte is addo.)
+        let v0 = asm.load(Opnd::mem(64, SP, 0));
+        let v1 = asm.load(Opnd::mem(64, SP, 8));
+        let sum = asm.add(v0, v1);
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.store(Opnd::mem(64, SP, 16), v0);
+        asm.store(Opnd::mem(64, SP, 24), sum);
+        asm.write_label(overflow);
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: ld r0, 0(r30)
+        0x4: std r0, -8(r31)
+        0x8: ld r3, 8(r30)
+        0xc: ld r11, -8(r31)
+        0x10: li r0, 0
+        0x14: mtxer r0
+        0x18: .byte 0x15, 0x1e, 0x6b, 0x7c
+        0x1c: bso 0x30
+        0x20: nop
+        0x24: ld r0, -8(r31)
+        0x28: std r0, 0x10(r30)
+        0x2c: std r3, 0x18(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"00001ee8f8ff1ff808007ee8f8ff7fe900000038a603017c151e6b7c1400834100000060f8ff1fe810001ef818007ef8");
     }
 }
