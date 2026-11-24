@@ -1,5 +1,6 @@
 use crate::asm::{CodeBlock, Label};
 use crate::asm::ppc64::*;
+use crate::codegen::split_patch_point;
 use crate::cruby::*;
 use crate::backend::lir::*;
 use crate::options::asm_dump;
@@ -638,6 +639,19 @@ impl Assembler {
             }
         }
 
+        /// Lower a CPushPair operand into something a store can take: a register,
+        /// or a zero immediate. Anything else is loaded into scratch_opnd.
+        fn split_push_operand(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
+            match opnd {
+                Opnd::Reg(_) | Opnd::UImm(0) | Opnd::Imm(0) => opnd,
+                Opnd::Mem(_) => split_memory_read(asm, opnd, scratch_opnd),
+                _ => {
+                    asm.load_into(scratch_opnd, opnd);
+                    scratch_opnd
+                }
+            }
+        }
+
         /// Lower what a store writes into something ppc64_emit can put in EMIT_OPND, which
         /// can't be the base that the load of a heap object goes through.
         fn split_store_source(asm: &mut Assembler, opnd: Opnd, scratch_opnd: Opnd) -> Opnd {
@@ -722,6 +736,29 @@ impl Assembler {
                     *right = split_memory_read(asm, *right, SCRATCH1_OPND);
                     asm.push_insn(insn);
                 }
+                // For compile_exits, support splitting simple C arguments here
+                Insn::CCall { data } if !data.opnds.is_empty() => {
+                    for (i, opnd) in data.opnds.iter().enumerate() {
+                        asm.load_into(C_ARG_OPNDS[i], *opnd);
+                    }
+                    data.opnds = vec![];
+                    asm.push_insn(insn);
+                }
+                Insn::CPushPair(opnd0, opnd1) => {
+                    if let Some(opnd0) = opnd0 {
+                        *opnd0 = split_push_operand(asm, *opnd0, SCRATCH0_OPND);
+                    }
+                    *opnd1 = split_push_operand(asm, *opnd1, SCRATCH1_OPND);
+                    asm.push_insn(insn);
+                }
+                // For compile_exits, support splitting simple return values here
+                Insn::CRet(opnd) => {
+                    match opnd {
+                        Opnd::Reg(C_RET_REG) => {},
+                        _ => asm.load_into(C_RET_OPND, *opnd),
+                    }
+                    asm.cret(C_RET_OPND);
+                }
                 Insn::Lea { opnd, out } => {
                     *opnd = split_only_stack_membase(asm, *opnd, SCRATCH0_OPND);
                     let mem_out = split_memory_write(out, SCRATCH0_OPND);
@@ -748,6 +785,12 @@ impl Assembler {
                         }
                     }
                 }
+                &mut Insn::IncrCounter { mem, value } => {
+                    // It's split here to support IncrCounter in compile_exits.
+                    assert!(matches!(mem, Opnd::UImm(_)));
+                    asm.load_into(SCRATCH0_OPND, mem);
+                    asm.incr_counter(SCRATCH0_OPND, value);
+                }
                 Insn::Store { dest, src } => {
                     *dest = split_stack_membase(asm, *dest, SCRATCH0_OPND);
                     *src = split_store_source(asm, *src, SCRATCH1_OPND);
@@ -766,6 +809,9 @@ impl Assembler {
                         }
                         _ => asm.push_insn(insn),
                     }
+                }
+                &mut Insn::PatchPoint(ref data) => {
+                    split_patch_point(asm, &data.target, data.invariant, data.version);
                 }
                 _ => {
                     asm.push_insn(insn);
@@ -3272,5 +3318,24 @@ mod tests {
         0x2c: std r3, 0x18(r30)
         ");
         assert_snapshot!(cb.hexdump(), @"00001ee8f8ff1ff808007ee8f8ff7fe900000038a603017c151e6b7c1400834100000060f8ff1fe810001ef818007ef8");
+    }
+
+    #[test]
+    fn test_scratch_split_incr_counter() {
+        let (mut asm, mut cb) = setup_asm();
+
+        asm.incr_counter(Opnd::const_ptr(0x1234_5678 as *const u8), 1.into());
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: lis r11, 0x1234
+        0x4: ori r11, r11, 0x5678
+        0x8: li r0, 0
+        0xc: ldarx r12, r11, r0
+        0x10: addi r12, r12, 1
+        0x14: stdcx. r12, r11, r0
+        0x18: bne 0xc
+        ");
+        assert_snapshot!(cb.hexdump(), @"3412603d78566b6100000038a8008b7d01008c39ad018b7df4ff8240");
     }
 }
