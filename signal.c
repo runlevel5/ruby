@@ -875,6 +875,10 @@ check_stack_overflow(int sig, const void *addr)
     rb_execution_context_t *ec = rb_current_execution_context(false);
     if (!ec) return;
     rb_thread_t *th = rb_ec_thread_ptr(ec);
+    /* A fault while SystemStackError is on its way is not for another
+     * overflow. Raising once more would only fault at the same place
+     * again, endlessly. */
+    if (rb_ec_raised_p(ec, RAISED_STACKOVERFLOW)) return;
     if (ruby_stack_overflowed_p(th, addr)) {
         reset_sigmask(sig);
         rb_ec_stack_overflow(th->ec, 1);
