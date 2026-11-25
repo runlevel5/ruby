@@ -55,6 +55,30 @@ jobs:
       - run: cargo clippy --all-targets --all-features
         working-directory: zjit
 
+  check-ppc64le:
+    name: cargo check (ppc64le)
+
+    runs-on: ubuntu-22.04
+
+    if: >-
+      ${{!(false
+      || contains(github.event.head_commit.message, '[DOC]')
+      || contains(github.event.pull_request.title, '[DOC]')
+      || contains(github.event.pull_request.labels.*.name, 'Documentation')
+      || (github.event.pull_request.user.login == 'dependabot[bot]' && !startsWith(github.head_ref, 'dependabot/cargo'))
+      )}}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: rustup target add powerpc64le-unknown-linux-gnu
+
+      # There is no ppc64le runner to run the tests on. Make sure the backend compiles.
+      - run: cargo check --all-targets --target powerpc64le-unknown-linux-gnu
+        working-directory: zjit
+
   doc-test:
     name: cargo test --doc
     runs-on: ubuntu-22.04
