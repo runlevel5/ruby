@@ -49,12 +49,25 @@ const C_SP_STEP: i32 = 16;
 /// back chain, CR save, LR save and TOC save doublewords
 const LINKAGE_AREA_SIZE: i32 = 32;
 
+/// Offset of the LR save doubleword in the linkage area. A callee saves its return address
+/// in the one of its caller.
+const LR_SAVE_OFFSET: i32 = 16;
+
+/// Size of the header at the bottom of a frame. Its first doubleword is the back chain,
+/// the address of the caller's frame, which stack walkers such as backtrace(3) and
+/// debuggers follow. The second one is padding for alignment.
+const FRAME_HEADER_SIZE: i32 = 16;
+
 /// Size of the area a caller reserves above the linkage area for a callee to
 /// save the eight argument registers. Stack-passed arguments come after it.
 const PARAM_SAVE_AREA_SIZE: i32 = 64;
 
 /// Offset from the native SP at function entry to the first stack-passed C argument
 pub const C_STACK_ARGS_ENTRY_OFFSET: i32 = LINKAGE_AREA_SIZE + PARAM_SAVE_AREA_SIZE;
+
+/// How far a call moves the frame header down for it to become the linkage area of the
+/// callee, with what was above the header right after the parameter save area
+const CALL_AREA_SIZE: i32 = C_STACK_ARGS_ENTRY_OFFSET - FRAME_HEADER_SIZE;
 
 /// Whether a lone [`Insn::CPush`] leaves the native SP misaligned for C calls
 pub const CPUSH_MISALIGNS_STACK: bool = false;
@@ -285,7 +298,7 @@ impl Assembler {
     /// How many bytes a call and a [Self::frame_setup] would change native SP
     pub fn frame_size() -> i32 {
         // A call leaves room for the linkage and parameter save areas of the callee,
-        // and frame_setup pushes the base pointer and the return address
+        // and frame_setup puts the base pointer right below them
         C_STACK_ARGS_ENTRY_OFFSET + C_SP_STEP
     }
 
@@ -1042,10 +1055,18 @@ impl Assembler {
             }
         }
 
-        /// Pop a value from the stack by loading `[sp]` then adding to the stack pointer.
+        /// Move SP, and the frame header it points at, by `disp` bytes. stdu stores the
+        /// back chain where SP is about to point, so there is one at SP at any moment.
+        fn emit_move_frame_header(cb: &mut CodeBlock, disp: i32) {
+            ld(cb, Assembler::EMIT_OPND, PPC64Opnd::new_mem(64, R1, 0));
+            stdu(cb, Assembler::EMIT_OPND, PPC64Opnd::new_mem(64, R1, disp));
+        }
+
+        /// Pop a value from the stack by loading the one above the frame header then
+        /// moving the header up over it.
         fn emit_pop(cb: &mut CodeBlock, opnd: PPC64Opnd) {
-            ld(cb, opnd, PPC64Opnd::new_mem(64, R1, 0));
-            addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
+            ld(cb, opnd, PPC64Opnd::new_mem(64, R1, FRAME_HEADER_SIZE));
+            emit_move_frame_header(cb, C_SP_STEP);
         }
 
         /// Emit a call to a function at an absolute address
@@ -1130,23 +1151,24 @@ impl Assembler {
                 },
                 &Insn::FrameSetup { preserved, slot_count } => {
                     const { assert!(SIZEOF_VALUE == 8, "alignment logic relies on SIZEOF_VALUE == 8"); }
-                    // Preserve r31 and the return address, which is in LR, as a pair
-                    // and set up r31 as the base pointer
+                    // The return address, which is in LR, goes to the LR save doubleword that
+                    // the caller has for us in its linkage area. r31 goes right below the
+                    // caller's frame, and becomes the base pointer.
                     mflr(cb, Self::EMIT_OPND);
-                    stdu(cb, R31, PPC64Opnd::new_mem(64, R1, -C_SP_STEP));
-                    std(cb, Self::EMIT_OPND, PPC64Opnd::new_mem(64, R1, SIZEOF_VALUE_I32));
-                    mr(cb, R31, R1);
+                    std(cb, Self::EMIT_OPND, PPC64Opnd::new_mem(64, R1, LR_SAVE_OFFSET));
+                    std(cb, R31, PPC64Opnd::new_mem(64, R1, -SIZEOF_VALUE_I32));
+                    addi(cb, R31, R1, PPC64Opnd::new_imm((-C_SP_STEP).into()));
 
-                    // Preserved registers go below the base pointer, and the slots below them.
-                    // Move SP past all of them at once.
+                    // Preserved registers go below the base pointer, the slots below them, and
+                    // the frame header at the bottom. stdu moves SP past all of them at once
+                    // and stores the back chain at the new SP.
                     let mut slot_count = slot_count + preserved.len();
                     // Align slot_count
                     if slot_count % 2 == 1 {
                         slot_count += 1
                     }
-                    if slot_count > 0 {
-                        emit_add_disp(cb, R1, R1, -((slot_count * SIZEOF_VALUE) as i32));
-                    }
+                    let frame_size = C_SP_STEP + (slot_count * SIZEOF_VALUE) as i32 + FRAME_HEADER_SIZE;
+                    stdu(cb, R1, PPC64Opnd::new_mem(64, R1, -frame_size));
                     for (idx, reg) in preserved.iter().enumerate() {
                         std(cb, reg.into(), PPC64Opnd::new_mem(64, R31, -(idx as i32 + 1) * SIZEOF_VALUE_I32));
                     }
@@ -1157,13 +1179,18 @@ impl Assembler {
                         ld(cb, reg.into(), PPC64Opnd::new_mem(64, R31, -(idx as i32 + 1) * SIZEOF_VALUE_I32));
                     }
 
-                    // SP = r31 (frame pointer)
-                    mr(cb, R1, R31);
-                    ld(cb, Self::EMIT_OPND, PPC64Opnd::new_mem(64, R1, SIZEOF_VALUE_I32));
-                    ld(cb, R31, PPC64Opnd::new_mem(64, R1, 0));
-                    addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
+                    // SP = the caller's frame, which is right above where r31 was saved
+                    ld(cb, Self::EMIT_OPND, PPC64Opnd::new_mem(64, R31, C_SP_STEP + LR_SAVE_OFFSET));
+                    addi(cb, R1, R31, PPC64Opnd::new_imm(C_SP_STEP.into()));
+                    ld(cb, R31, PPC64Opnd::new_mem(64, R31, SIZEOF_VALUE_I32));
                     mtlr(cb, Self::EMIT_OPND);
                 }
+                // Popping the stack arguments of a call, which were pushed above the frame header
+                Insn::Add { left, right, out } if *out == NATIVE_STACK_PTR => {
+                    assert_eq!(*left, NATIVE_STACK_PTR, "native SP should only be set from itself");
+                    let bytes = imm_opnd_value(right).expect("native SP should move by an immediate");
+                    emit_move_frame_header(cb, bytes.try_into().unwrap());
+                },
                 Insn::Add { left, right, out } => {
                     let checked = overflow_checked(insns, insn_idx);
                     match imm_opnd_value(right) {
@@ -1403,20 +1430,22 @@ impl Assembler {
                     }
                 },
                 Insn::CPush(opnd) => {
-                    // Push a value to the stack by storing below the stack pointer and moving
-                    // it there, leaving an 8-byte gap for alignment.
-                    stdu(cb, opnd.into(), PPC64Opnd::new_mem(64, R1, -C_SP_STEP));
+                    // Push a value to the stack by moving the frame header down and storing
+                    // where it was, leaving an 8-byte gap for alignment.
+                    emit_move_frame_header(cb, -C_SP_STEP);
+                    std(cb, opnd.into(), PPC64Opnd::new_mem(64, R1, FRAME_HEADER_SIZE));
                 },
                 Insn::CPushPair(opnd0, opnd1) => {
+                    emit_move_frame_header(cb, -C_SP_STEP);
                     // Second operand ends up at the lower stack address
                     if let Some(opnd0) = opnd0 {
                         let first_push = emit_push_operand(cb, opnd0);
-                        std(cb, first_push, PPC64Opnd::new_mem(64, R1, -SIZEOF_VALUE_I32));
+                        std(cb, first_push, PPC64Opnd::new_mem(64, R1, FRAME_HEADER_SIZE + SIZEOF_VALUE_I32));
                     }
                     // With no first operand, write only the lower slot while
                     // still reserving the pair.
                     let second_push = emit_push_operand(cb, opnd1);
-                    stdu(cb, second_push, PPC64Opnd::new_mem(64, R1, -C_SP_STEP));
+                    std(cb, second_push, PPC64Opnd::new_mem(64, R1, FRAME_HEADER_SIZE));
                 },
                 Insn::CPop { out } => {
                     emit_pop(cb, out.into());
@@ -1428,17 +1457,17 @@ impl Assembler {
                     // First operand is popped from the lower stack address.
                     // The second one wins when they are the same register.
                     if opnd0 != opnd1 {
-                        ld(cb, opnd0.into(), PPC64Opnd::new_mem(64, R1, 0));
+                        ld(cb, opnd0.into(), PPC64Opnd::new_mem(64, R1, FRAME_HEADER_SIZE));
                     }
-                    ld(cb, opnd1.into(), PPC64Opnd::new_mem(64, R1, SIZEOF_VALUE_I32));
-                    addi(cb, R1, R1, PPC64Opnd::new_imm(C_SP_STEP.into()));
+                    ld(cb, opnd1.into(), PPC64Opnd::new_mem(64, R1, FRAME_HEADER_SIZE + SIZEOF_VALUE_I32));
+                    emit_move_frame_header(cb, C_SP_STEP);
                 },
                 Insn::CCall { data, .. } => {
                     // Whatever we call saves LR, and possibly more, in the linkage area that it
                     // expects at SP, and looks for its stack arguments above the parameter save
-                    // area. Pushes move SP, so there is no telling what is at SP. Make room for
-                    // the two areas below what has been pushed, around every call.
-                    addi(cb, R1, R1, PPC64Opnd::new_imm((-C_STACK_ARGS_ENTRY_OFFSET).into()));
+                    // area. Pushes leave them right above the frame header, so move the header
+                    // down until it is the start of a linkage area that far from them.
+                    emit_move_frame_header(cb, -CALL_AREA_SIZE);
 
                     let fptr = &data.fptr;
                     match fptr {
@@ -1453,7 +1482,8 @@ impl Assembler {
                         _ => unreachable!("unsupported ccall fptr: {fptr:?}")
                     }
 
-                    addi(cb, R1, R1, PPC64Opnd::new_imm(C_STACK_ARGS_ENTRY_OFFSET.into()));
+                    // The callee may have saved its arguments over where the header was
+                    emit_move_frame_header(cb, CALL_AREA_SIZE);
                 },
                 Insn::CRet { .. } => {
                     blr(cb);
@@ -2341,10 +2371,11 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: addi r1, r1, 0x20
-        0x4: addi r1, r1, -0x20
+        0x0: ld r0, 0(r1)
+        0x4: stdu r0, 0x20(r1)
+        0x8: addi r1, r1, -0x20
         ");
-        assert_snapshot!(cb.hexdump(), @"20002138e0ff2138");
+        assert_snapshot!(cb.hexdump(), @"000001e8210001f8e0ff2138");
     }
 
     #[test]
@@ -2712,17 +2743,17 @@ mod tests {
 
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: mflr r0
-        0x4: stdu r31, -0x10(r1)
-        0x8: std r0, 8(r1)
-        0xc: mr r31, r1
-        0x10: mr r1, r31
-        0x14: ld r0, 8(r1)
-        0x18: ld r31, 0(r1)
-        0x1c: addi r1, r1, 0x10
+        0x4: std r0, 0x10(r1)
+        0x8: std r31, -8(r1)
+        0xc: addi r31, r1, -0x10
+        0x10: stdu r1, -0x20(r1)
+        0x14: ld r0, 0x20(r31)
+        0x18: addi r1, r31, 0x10
+        0x1c: ld r31, 8(r31)
         0x20: mtlr r0
         0x24: blr
         ");
-        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7c78fbe17f080001e80000e1eb10002138a603087c2000804e");
+        assert_snapshot!(cb.hexdump(), @"a602087c100001f8f8ffe1fbf0ffe13be1ff21f820001fe810003f380800ffeba603087c2000804e");
     }
 
     #[test]
@@ -2736,23 +2767,22 @@ mod tests {
 
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: mflr r0
-        0x4: stdu r31, -0x10(r1)
-        0x8: std r0, 8(r1)
-        0xc: mr r31, r1
-        0x10: addi r1, r1, -0x20
+        0x4: std r0, 0x10(r1)
+        0x8: std r31, -8(r1)
+        0xc: addi r31, r1, -0x10
+        0x10: stdu r1, -0x40(r1)
         0x14: std r28, -8(r31)
         0x18: std r30, -0x10(r31)
         0x1c: std r29, -0x18(r31)
         0x20: ld r28, -8(r31)
         0x24: ld r30, -0x10(r31)
         0x28: ld r29, -0x18(r31)
-        0x2c: mr r1, r31
-        0x30: ld r0, 8(r1)
-        0x34: ld r31, 0(r1)
-        0x38: addi r1, r1, 0x10
-        0x3c: mtlr r0
+        0x2c: ld r0, 0x20(r31)
+        0x30: addi r1, r31, 0x10
+        0x34: ld r31, 8(r31)
+        0x38: mtlr r0
         ");
-        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7ce0ff2138f8ff9ffbf0ffdffbe8ffbffbf8ff9febf0ffdfebe8ffbfeb78fbe17f080001e80000e1eb10002138a603087c");
+        assert_snapshot!(cb.hexdump(), @"a602087c100001f8f8ffe1fbf0ffe13bc1ff21f8f8ff9ffbf0ffdffbe8ffbffbf8ff9febf0ffdfebe8ffbfeb20001fe810003f380800ffeba603087c");
     }
 
     #[test]
@@ -2765,12 +2795,12 @@ mod tests {
 
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: mflr r0
-        0x4: stdu r31, -0x10(r1)
-        0x8: std r0, 8(r1)
-        0xc: mr r31, r1
-        0x10: addi r1, r1, -0x80
+        0x4: std r0, 0x10(r1)
+        0x8: std r31, -8(r1)
+        0xc: addi r31, r1, -0x10
+        0x10: stdu r1, -0xa0(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7c80ff2138");
+        assert_snapshot!(cb.hexdump(), @"a602087c100001f8f8ffe1fbf0ffe13b61ff21f8");
     }
 
     #[test]
@@ -2784,12 +2814,12 @@ mod tests {
 
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: mflr r0
-        0x4: stdu r31, -0x10(r1)
-        0x8: std r0, 8(r1)
-        0xc: mr r31, r1
-        0x10: addi r1, r1, -0x4000
+        0x4: std r0, 0x10(r1)
+        0x8: std r31, -8(r1)
+        0xc: addi r31, r1, -0x10
+        0x10: stdu r1, -0x4020(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"a602087cf1ffe1fb080001f8780b3f7c00c02138");
+        assert_snapshot!(cb.hexdump(), @"a602087c100001f8f8ffe1fbf0ffe13be1bf21f8");
     }
 
     #[test]
@@ -2811,11 +2841,14 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: stdu r3, -0x10(r1)
-        0x4: ld r3, 0(r1)
-        0x8: addi r1, r1, 0x10
+        0x0: ld r0, 0(r1)
+        0x4: stdu r0, -0x10(r1)
+        0x8: std r3, 0x10(r1)
+        0xc: ld r3, 0x10(r1)
+        0x10: ld r0, 0(r1)
+        0x14: stdu r0, 0x10(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"f1ff61f8000061e810002138");
+        assert_snapshot!(cb.hexdump(), @"000001e8f1ff01f8100061f8100061e8000001e8110001f8");
     }
 
     #[test]
@@ -2830,14 +2863,20 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: std r3, -8(r1)
-        0x4: stdu r4, -0x10(r1)
-        0x8: std r3, -8(r1)
-        0xc: li r0, 0
-        0x10: stdu r0, -0x10(r1)
-        0x14: stdu r4, -0x10(r1)
+        0x0: ld r0, 0(r1)
+        0x4: stdu r0, -0x10(r1)
+        0x8: std r3, 0x18(r1)
+        0xc: std r4, 0x10(r1)
+        0x10: ld r0, 0(r1)
+        0x14: stdu r0, -0x10(r1)
+        0x18: std r3, 0x18(r1)
+        0x1c: li r0, 0
+        0x20: std r0, 0x10(r1)
+        0x24: ld r0, 0(r1)
+        0x28: stdu r0, -0x10(r1)
+        0x2c: std r4, 0x10(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"f8ff61f8f1ff81f8f8ff61f800000038f1ff01f8f1ff81f8");
+        assert_snapshot!(cb.hexdump(), @"000001e8f1ff01f8180061f8100081f8000001e8f1ff01f8180061f800000038100001f8000001e8f1ff01f8100081f8");
     }
 
     #[test]
@@ -2850,13 +2889,15 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: ld r4, 0(r1)
-        0x4: ld r3, 8(r1)
-        0x8: addi r1, r1, 0x10
-        0xc: ld r3, 8(r1)
-        0x10: addi r1, r1, 0x10
+        0x0: ld r4, 0x10(r1)
+        0x4: ld r3, 0x18(r1)
+        0x8: ld r0, 0(r1)
+        0xc: stdu r0, 0x10(r1)
+        0x10: ld r3, 0x18(r1)
+        0x14: ld r0, 0(r1)
+        0x18: stdu r0, 0x10(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"000081e8080061e810002138080061e810002138");
+        assert_snapshot!(cb.hexdump(), @"100081e8180061e8000001e8110001f8180061e8000001e8110001f8");
     }
 
     #[test]
@@ -2869,14 +2910,16 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: addi r1, r1, -0x60
-        0x4: lis r12, 0x1234
-        0x8: ori r12, r12, 0x5678
-        0xc: mtctr r12
-        0x10: bctrl
-        0x14: addi r1, r1, 0x60
+        0x0: ld r0, 0(r1)
+        0x4: stdu r0, -0x50(r1)
+        0x8: lis r12, 0x1234
+        0xc: ori r12, r12, 0x5678
+        0x10: mtctr r12
+        0x14: bctrl
+        0x18: ld r0, 0(r1)
+        0x1c: stdu r0, 0x50(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"a0ff21383412803d78568c61a603897d2104804e60002138");
+        assert_snapshot!(cb.hexdump(), @"000001e8b1ff01f83412803d78568c61a603897d2104804e000001e8510001f8");
     }
 
     #[test]
@@ -2887,13 +2930,15 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: addi r1, r1, -0x60
-        0x4: mr r12, r5
-        0x8: mtctr r12
-        0xc: bctrl
-        0x10: addi r1, r1, 0x60
+        0x0: ld r0, 0(r1)
+        0x4: stdu r0, -0x50(r1)
+        0x8: mr r12, r5
+        0xc: mtctr r12
+        0x10: bctrl
+        0x14: ld r0, 0(r1)
+        0x18: stdu r0, 0x50(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"a0ff2138782bac7ca603897d2104804e60002138");
+        assert_snapshot!(cb.hexdump(), @"000001e8b1ff01f8782bac7ca603897d2104804e000001e8510001f8");
     }
 
     #[test]
@@ -2906,11 +2951,13 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: addi r1, r1, -0x60
-        0x4: bl 0x100
-        0x8: addi r1, r1, 0x60
+        0x0: ld r0, 0(r1)
+        0x4: stdu r0, -0x50(r1)
+        0x8: bl 0x100
+        0xc: ld r0, 0(r1)
+        0x10: stdu r0, 0x50(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"a0ff2138fd00004860002138");
+        assert_snapshot!(cb.hexdump(), @"000001e8b1ff01f8f9000048000001e8510001f8");
     }
 
     #[test]
@@ -2930,15 +2977,18 @@ mod tests {
         let (near_size, near_disasm) = code_size(0);
         let (far_size, far_disasm) = code_size(1 << 26);
         assert_eq!(near_size, far_size);
-        // addi, 5 instructions for the address, mtctr, bctrl, addi
-        assert_eq!(9 * 4, near_size);
+        // 2 instructions to move the frame header down, 5 for the address, mtctr, bctrl,
+        // 2 to move the header back up
+        assert_eq!(11 * 4, near_size);
         assert_eq!(near_disasm, far_disasm);
         assert_disasm_snapshot!(near_disasm, @"
-        addi r1, r1, -0x60
+        ld r0, 0(r1)
+        stdu r0, -0x50(r1)
         load r12, address
         mtctr r12
         bctrl
-        addi r1, r1, 0x60
+        ld r0, 0(r1)
+        stdu r0, 0x50(r1)
         ");
     }
 
@@ -3130,13 +3180,15 @@ mod tests {
         0x0: mr r11, r3
         0x4: mr r3, r4
         0x8: mr r4, r11
-        0xc: addi r1, r1, -0x60
-        0x10: li r12, 0
-        0x14: mtctr r12
-        0x18: bctrl
-        0x1c: addi r1, r1, 0x60
+        0xc: ld r0, 0(r1)
+        0x10: stdu r0, -0x50(r1)
+        0x14: li r12, 0
+        0x18: mtctr r12
+        0x1c: bctrl
+        0x20: ld r0, 0(r1)
+        0x24: stdu r0, 0x50(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"781b6b7c7823837c785b647da0ff213800008039a603897d2104804e60002138");
+        assert_snapshot!(cb.hexdump(), @"781b6b7c7823837c785b647d000001e8b1ff01f800008039a603897d2104804e000001e8510001f8");
     }
 
     #[test]
@@ -3157,26 +3209,34 @@ mod tests {
         0x0: li r3, 1
         0x4: li r4, 2
         0x8: li r5, 3
-        0xc: std r3, -8(r1)
-        0x10: stdu r4, -0x10(r1)
-        0x14: std r5, -8(r1)
-        0x18: li r0, 0
-        0x1c: stdu r0, -0x10(r1)
-        0x20: addi r1, r1, -0x60
-        0x24: li r12, 0
-        0x28: mtctr r12
-        0x2c: bctrl
-        0x30: addi r1, r1, 0x60
-        0x34: ld r5, 8(r1)
-        0x38: addi r1, r1, 0x10
-        0x3c: ld r4, 0(r1)
-        0x40: ld r3, 8(r1)
-        0x44: addi r1, r1, 0x10
-        0x48: std r3, 0(r30)
-        0x4c: std r4, 8(r30)
-        0x50: std r5, 0x10(r30)
+        0xc: ld r0, 0(r1)
+        0x10: stdu r0, -0x10(r1)
+        0x14: std r3, 0x18(r1)
+        0x18: std r4, 0x10(r1)
+        0x1c: ld r0, 0(r1)
+        0x20: stdu r0, -0x10(r1)
+        0x24: std r5, 0x18(r1)
+        0x28: li r0, 0
+        0x2c: std r0, 0x10(r1)
+        0x30: ld r0, 0(r1)
+        0x34: stdu r0, -0x50(r1)
+        0x38: li r12, 0
+        0x3c: mtctr r12
+        0x40: bctrl
+        0x44: ld r0, 0(r1)
+        0x48: stdu r0, 0x50(r1)
+        0x4c: ld r5, 0x18(r1)
+        0x50: ld r0, 0(r1)
+        0x54: stdu r0, 0x10(r1)
+        0x58: ld r4, 0x10(r1)
+        0x5c: ld r3, 0x18(r1)
+        0x60: ld r0, 0(r1)
+        0x64: stdu r0, 0x10(r1)
+        0x68: std r3, 0(r30)
+        0x6c: std r4, 8(r30)
+        0x70: std r5, 0x10(r30)
         ");
-        assert_snapshot!(cb.hexdump(), @"01006038020080380300a038f8ff61f8f1ff81f8f8ffa1f800000038f1ff01f8a0ff213800008039a603897d2104804e600021380800a1e810002138000081e8080061e81000213800007ef808009ef81000bef8");
+        assert_snapshot!(cb.hexdump(), @"01006038020080380300a038000001e8f1ff01f8180061f8100081f8000001e8f1ff01f81800a1f800000038100001f8000001e8b1ff01f800008039a603897d2104804e000001e8510001f81800a1e8000001e8110001f8100081e8180061e8000001e8110001f800007ef808009ef81000bef8");
     }
 
     #[test]
@@ -3201,15 +3261,20 @@ mod tests {
         0x14: li r8, 6
         0x18: li r9, 7
         0x1c: li r10, 8
-        0x20: stdu r3, -0x10(r1)
-        0x24: addi r1, r1, -0x60
-        0x28: li r12, 0
-        0x2c: mtctr r12
-        0x30: bctrl
-        0x34: addi r1, r1, 0x60
-        0x38: addi r1, r1, 0x10
+        0x20: ld r0, 0(r1)
+        0x24: stdu r0, -0x10(r1)
+        0x28: std r3, 0x10(r1)
+        0x2c: ld r0, 0(r1)
+        0x30: stdu r0, -0x50(r1)
+        0x34: li r12, 0
+        0x38: mtctr r12
+        0x3c: bctrl
+        0x40: ld r0, 0(r1)
+        0x44: stdu r0, 0x50(r1)
+        0x48: ld r0, 0(r1)
+        0x4c: stdu r0, 0x10(r1)
         ");
-        assert_snapshot!(cb.hexdump(), @"01006038020080380300a0380400c0380500e038060000390700203908004039f1ff61f8a0ff213800008039a603897d2104804e6000213810002138");
+        assert_snapshot!(cb.hexdump(), @"01006038020080380300a0380400c0380500e038060000390700203908004039000001e8f1ff01f8100061f8000001e8b1ff01f800008039a603897d2104804e000001e8510001f8000001e8110001f8");
     }
 
     #[test]
