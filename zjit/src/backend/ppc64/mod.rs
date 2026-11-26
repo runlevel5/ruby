@@ -41,6 +41,49 @@ pub const C_RET_OPND: Opnd = Opnd::Reg(R3_REG);
 pub const NATIVE_STACK_PTR: Opnd = Opnd::Reg(R1_REG);
 pub const NATIVE_BASE_PTR: Opnd = Opnd::Reg(R31_REG);
 
+/// A version of the Power ISA, oldest first
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PowerIsa {
+    /// What POWER8 implements, the oldest CPU this backend generates code for
+    V2_07,
+    /// What POWER9 implements
+    V3_0,
+}
+
+/// The newest version of the Power ISA that the CPU we are running on implements
+#[cfg(not(test))]
+fn power_isa() -> PowerIsa {
+    use std::ffi::c_ulong;
+    use std::sync::OnceLock;
+
+    unsafe extern "C" {
+        fn getauxval(type_: c_ulong) -> c_ulong;
+    }
+    const AT_HWCAP2: c_ulong = 26;
+    const PPC_FEATURE2_ARCH_3_00: c_ulong = 0x0080_0000;
+
+    static ISA: OnceLock<PowerIsa> = OnceLock::new();
+    *ISA.get_or_init(|| {
+        let hwcap2 = unsafe { getauxval(AT_HWCAP2) };
+        if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 {
+            PowerIsa::V3_0
+        } else {
+            PowerIsa::V2_07
+        }
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests generate the same code on every CPU. One that is about a newer ISA sets this.
+    static TEST_POWER_ISA: std::cell::Cell<PowerIsa> = const { std::cell::Cell::new(PowerIsa::V2_07) };
+}
+
+#[cfg(test)]
+fn power_isa() -> PowerIsa {
+    TEST_POWER_ISA.get()
+}
+
 /// How far a push or a pop moves the native SP, which always needs to be
 /// aligned to a 16-byte boundary
 const C_SP_STEP: i32 = 16;
@@ -1029,10 +1072,37 @@ impl Assembler {
         }
 
         /// Clear SO of XER, which stays set once an operation has overflowed, so that
-        /// it tells about the overflow-recording instruction that comes next
+        /// it tells about the overflow-recording instruction that comes next.
+        /// ISA 3.0 doesn't go through SO. See [`emit_overflow_recording`].
         fn emit_clear_overflow(cb: &mut CodeBlock) {
-            li(cb, Assembler::EMIT_OPND, PPC64Opnd::new_imm(0));
-            mtxer(cb, Assembler::EMIT_OPND);
+            if power_isa() < PowerIsa::V3_0 {
+                li(cb, Assembler::EMIT_OPND, PPC64Opnd::new_imm(0));
+                mtxer(cb, Assembler::EMIT_OPND);
+            }
+        }
+
+        type EmitArith = fn(&mut CodeBlock, PPC64Opnd, PPC64Opnd, PPC64Opnd);
+
+        /// Emit an overflow-recording instruction so that CR0 has a bit for Jo to branch on,
+        /// which [`overflow_condition`] tells. ISA 3.0 has an instruction that copies OV of
+        /// XER there, which is only about the last such instruction. Before it, the form
+        /// that also sets CR0 copies SO, which [`emit_clear_overflow`] needs to clear first.
+        fn emit_overflow_recording(cb: &mut CodeBlock, arith: EmitArith, arith_dot: EmitArith, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+            if power_isa() >= PowerIsa::V3_0 {
+                arith(cb, rt, ra, rb);
+                mcrxrx(cb);
+            } else {
+                arith_dot(cb, rt, ra, rb);
+            }
+        }
+
+        /// The condition that CR0 meets after [`emit_overflow_recording`] on overflow
+        fn overflow_condition() -> Condition {
+            if power_isa() >= PowerIsa::V3_0 {
+                Condition::LT
+            } else {
+                Condition::SO
+            }
         }
 
         /// Clear the upper 32 bits of the result of a 32-bit operation, like
@@ -1200,7 +1270,7 @@ impl Assembler {
                         _ if checked => {
                             emit_clear_overflow(cb);
                             let right = emit_reg_or_imm(cb, right);
-                            addo_dot(cb, out.into(), left.into(), right);
+                            emit_overflow_recording(cb, addo, addo_dot, out.into(), left.into(), right);
                         }
                         _ => {
                             let right = emit_reg_or_imm(cb, right);
@@ -1222,7 +1292,7 @@ impl Assembler {
                         _ if checked => {
                             emit_clear_overflow(cb);
                             let right = emit_reg_or_imm(cb, right);
-                            subfo_dot(cb, out.into(), right, left.into());
+                            emit_overflow_recording(cb, subfo, subfo_dot, out.into(), right, left.into());
                         }
                         _ => {
                             let right = emit_reg_or_imm(cb, right);
@@ -1235,7 +1305,7 @@ impl Assembler {
                     // If the next instruction is JoMul
                     if overflow_checked(insns, insn_idx) {
                         emit_clear_overflow(cb);
-                        mulldo_dot(cb, out.into(), left.into(), right.into());
+                        emit_overflow_recording(cb, mulldo, mulldo_dot, out.into(), left.into(), right.into());
                     } else {
                         mulld(cb, out.into(), left.into(), right.into());
                     }
@@ -1307,7 +1377,7 @@ impl Assembler {
                         // adding the value to itself, which can.
                         Some(1) if overflow_checked(insns, insn_idx) => {
                             emit_clear_overflow(cb);
-                            addo_dot(cb, out.into(), opnd.into(), opnd.into());
+                            emit_overflow_recording(cb, addo, addo_dot, out.into(), opnd.into(), opnd.into());
                         }
                         Some(shift) => sldi(cb, out.into(), opnd.into(), PPC64Opnd::new_imm(shift)),
                         None => sld(cb, out.into(), opnd.into(), shift.into()),
@@ -1573,7 +1643,7 @@ impl Assembler {
                     emit_conditional_jump(self, cb, Condition::LT, target.clone());
                 },
                 Insn::Jo(target) | Insn::JoMul(target) => {
-                    emit_conditional_jump(self, cb, Condition::SO, target.clone());
+                    emit_conditional_jump(self, cb, overflow_condition(), target.clone());
                 },
                 Insn::Joz(opnd, target) => {
                     cmpdi(cb, opnd.into(), PPC64Opnd::new_imm(0));
@@ -2409,6 +2479,55 @@ mod tests {
         0x2c: nop
         ");
         assert_snapshot!(cb.hexdump(), @"00000038a603017c152e647c240083410000006000000038a603017c010000381506647c00007ef80800834100000060");
+    }
+
+    #[test]
+    fn test_emit_overflow_check_isa_3_0() {
+        TEST_POWER_ISA.set(PowerIsa::V3_0);
+        let (mut asm, mut cb) = setup_asm();
+        let overflow = asm.new_label("overflow");
+
+        // OV of XER is not sticky, and mcrxrx copies it to LT of CR0.
+        // (.byte is addo, subfo and mulldo.)
+        asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Imm(1), out: Opnd::Reg(R3_REG) });
+        asm.store(Opnd::mem(64, SP, 0), Opnd::Reg(R3_REG));
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.push_insn(Insn::Mul { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::JoMul(overflow.clone()));
+        asm.push_insn(Insn::LShift { opnd: Opnd::Reg(R4_REG), shift: Opnd::UImm(1), out: Opnd::Reg(R3_REG) });
+        asm.push_insn(Insn::Jo(overflow.clone()));
+        asm.write_label(overflow);
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: .byte 0x14, 0x2e, 0x64, 0x7c
+        0x4: mcrxrx cr0
+        0x8: blt 0x58
+        0xc: nop
+        0x10: li r0, 1
+        0x14: .byte 0x14, 0x06, 0x64, 0x7c
+        0x18: mcrxrx cr0
+        0x1c: std r3, 0(r30)
+        0x20: blt 0x58
+        0x24: nop
+        0x28: .byte 0x50, 0x24, 0x65, 0x7c
+        0x2c: mcrxrx cr0
+        0x30: blt 0x58
+        0x34: nop
+        0x38: .byte 0xd2, 0x2d, 0x64, 0x7c
+        0x3c: mcrxrx cr0
+        0x40: blt 0x58
+        0x44: nop
+        0x48: .byte 0x14, 0x26, 0x64, 0x7c
+        0x4c: mcrxrx cr0
+        0x50: blt 0x58
+        0x54: nop
+        ");
+        assert_snapshot!(cb.hexdump(), @"142e647c8004007c5000804100000060010000381406647c8004007c00007ef838008041000000605024657c8004007c2800804100000060d22d647c8004007c18008041000000601426647c8004007c0800804100000060");
     }
 
     #[test]
