@@ -194,6 +194,13 @@ impl XForm {
         Self { rt: rs, ra, rb, xo: 214, rc: true }
     }
 
+    /// MCRXRX: copy OV, OV32, CA and CA32 of XER to CR field bf, in this order
+    /// Power ISA 3.0B, Book I, Move To/From System Register Instructions
+    pub fn mcrxrx(bf: u8) -> Self {
+        assert!(bf < 8);
+        Self { rt: bf << 2, ra: 0, rb: 0, xo: 576, rc: false }
+    }
+
     /// TRAP: raise a trap exception unconditionally. This is tw with all five conditions selected.
     /// Power ISA 2.07B, Book I, Fixed-Point Trap Instructions
     pub fn trap() -> Self {
@@ -406,6 +413,12 @@ mod tests {
     fn test_stdcx_dot() {
         let result: u32 = XForm::stdcx_dot(3, 4, 5).into();
         assert_eq!(0x7c6429ad, result);
+    }
+
+    #[test]
+    fn test_mcrxrx() {
+        let result: u32 = XForm::mcrxrx(0).into();
+        assert_eq!(0x7c000480, result);
     }
 
     #[test]

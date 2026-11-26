@@ -251,6 +251,25 @@ pub fn mulhd(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// ADDO - add ra and rb, put the result in rt, set OV of XER on signed overflow
+pub fn addo(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::addo(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// SUBFO - subtract ra from rb, put the result in rt, set OV of XER on signed overflow
+pub fn subfo(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::subfo(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
+/// MULLDO - multiply ra by rb, put the low 64 bits of the product in rt, set OV of XER
+/// if the product does not fit in them
+pub fn mulldo(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
+    let bytes: [u8; 4] = XOForm::mulldo(reg_no(rt), reg_no(ra), reg_no(rb)).into();
+    cb.write_bytes(&bytes);
+}
+
 /// ADDO. - add ra and rb, put the result in rt, set SO of CR0 on signed overflow.
 /// SO is sticky, so it only tells about this addition if SO of XER was clear before it.
 pub fn addo_dot(cb: &mut CodeBlock, rt: PPC64Opnd, ra: PPC64Opnd, rb: PPC64Opnd) {
@@ -580,6 +599,13 @@ pub fn mtxer(cb: &mut CodeBlock, rs: PPC64Opnd) {
     cb.write_bytes(&bytes);
 }
 
+/// MCRXRX - copy OV of XER to LT of CR0, which is where it is in XER now, unlike SO.
+/// GT, EQ and SO of CR0 get OV32, CA and CA32. Needs ISA 3.0.
+pub fn mcrxrx(cb: &mut CodeBlock) {
+    let bytes: [u8; 4] = XForm::mcrxrx(0).into();
+    cb.write_bytes(&bytes);
+}
+
 /// ISEL - put truthy in rt if CR0 meets the condition, and falsy otherwise
 pub fn isel(cb: &mut CodeBlock, rt: PPC64Opnd, truthy: PPC64Opnd, falsy: PPC64Opnd, cond: Condition) {
     // The instruction only picks its first operand when a CR bit is set
@@ -876,6 +902,30 @@ mod tests {
         let cb = compile(|cb| mulhd(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mulhd r3, r4, r5");
         assert_snapshot!(cb.hexdump(), @"9228647c");
+    }
+
+    #[test]
+    fn test_addo() {
+        let cb = compile(|cb| addo(cb, R3, R4, R5));
+        // Capstone doesn't decode the overflow-recording forms
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x14, 0x2e, 0x64, 0x7c");
+        assert_snapshot!(cb.hexdump(), @"142e647c");
+    }
+
+    #[test]
+    fn test_subfo() {
+        let cb = compile(|cb| subfo(cb, R3, R4, R5));
+        // Capstone doesn't decode the overflow-recording forms
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x50, 0x2c, 0x64, 0x7c");
+        assert_snapshot!(cb.hexdump(), @"502c647c");
+    }
+
+    #[test]
+    fn test_mulldo() {
+        let cb = compile(|cb| mulldo(cb, R3, R4, R5));
+        // Capstone doesn't decode the overflow-recording forms
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0xd2, 0x2d, 0x64, 0x7c");
+        assert_snapshot!(cb.hexdump(), @"d22d647c");
     }
 
     #[test]
@@ -1334,6 +1384,13 @@ mod tests {
         let cb = compile(|cb| mtxer(cb, R0));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtxer r0");
         assert_snapshot!(cb.hexdump(), @"a603017c");
+    }
+
+    #[test]
+    fn test_mcrxrx() {
+        let cb = compile(mcrxrx);
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: mcrxrx cr0");
+        assert_snapshot!(cb.hexdump(), @"8004007c");
     }
 
     #[test]

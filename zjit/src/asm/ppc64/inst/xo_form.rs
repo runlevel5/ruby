@@ -57,6 +57,25 @@ impl XOForm {
         Self { rt, ra, rb, oe: false, xo: 73, rc: false }
     }
 
+    /// ADDO: rt = ra + rb, setting OV and SO of XER on signed overflow
+    /// Power ISA 2.07B, Book I, Fixed-Point Arithmetic Instructions
+    pub fn addo(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { oe: true, ..Self::add(rt, ra, rb) }
+    }
+
+    /// SUBFO: rt = rb - ra, setting OV and SO of XER on signed overflow
+    /// Power ISA 2.07B, Book I, Fixed-Point Arithmetic Instructions
+    pub fn subfo(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { oe: true, ..Self::subf(rt, ra, rb) }
+    }
+
+    /// MULLDO: rt = low 64 bits of ra * rb, setting OV and SO of XER if the
+    /// product does not fit in 64 bits
+    /// Power ISA 2.07B, Book I, Fixed-Point Arithmetic Instructions
+    pub fn mulldo(rt: u8, ra: u8, rb: u8) -> Self {
+        Self { oe: true, ..Self::mulld(rt, ra, rb) }
+    }
+
     /// ADDO.: rt = ra + rb, setting OV and SO of XER on signed overflow, and CR0
     /// Power ISA 2.07B, Book I, Fixed-Point Arithmetic Instructions
     pub fn addo_dot(rt: u8, ra: u8, rb: u8) -> Self {
@@ -133,6 +152,24 @@ mod tests {
     fn test_mulhd() {
         let result: u32 = XOForm::mulhd(3, 4, 5).into();
         assert_eq!(0x7c642892, result);
+    }
+
+    #[test]
+    fn test_addo() {
+        let result: u32 = XOForm::addo(3, 4, 5).into();
+        assert_eq!(0x7c642e14, result);
+    }
+
+    #[test]
+    fn test_subfo() {
+        let result: u32 = XOForm::subfo(3, 4, 5).into();
+        assert_eq!(0x7c642c50, result);
+    }
+
+    #[test]
+    fn test_mulldo() {
+        let result: u32 = XOForm::mulldo(3, 4, 5).into();
+        assert_eq!(0x7c642dd2, result);
     }
 
     #[test]
