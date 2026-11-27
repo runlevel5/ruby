@@ -10,7 +10,7 @@ use std::ffi::{c_int, c_long, c_void};
 use std::slice;
 
 use crate::asm::LabelName;
-use crate::backend::current::ALLOC_REGS;
+use crate::backend::current::{ALLOC_REGS, CPUSH_MISALIGNS_STACK, C_STACK_ARGS_ENTRY_OFFSET};
 use crate::invariants::{
     track_bop_assumption, track_cme_assumption, track_no_ep_escape_assumption, track_no_trace_point_assumption,
     track_single_ractor_assumption, track_stable_constant_names_assumption, track_no_singleton_class_assumption,
@@ -2311,7 +2311,7 @@ fn gen_string_copy(jit: &mut JITState, asm: &mut Assembler, function: &Function,
         |asm, obj| {
             asm.store(Opnd::mem(VALUE_BITS, obj, RUBY_OFFSET_RSTRING_LEN), Opnd::Imm(len));
             for (i, chunk) in string_bytes.chunks_exact(8).enumerate() {
-                let word = u64::from_le_bytes(chunk.try_into().unwrap());
+                let word = u64::from_ne_bytes(chunk.try_into().unwrap());
                 let offset = RUBY_OFFSET_RSTRING_AS_ARY + (i as i32) * 8;
                 asm.store(Opnd::mem(64, obj, offset), Opnd::UImm(word));
             }
@@ -3945,7 +3945,7 @@ macro_rules! c_callable {
         $vis extern "sysv64" fn $f $args $(-> $ret)? $body
     };
 }
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "powerpc64"))]
 macro_rules! c_callable {
     ($(#[$outer:meta])*
     $vis:vis fn $f:ident $args:tt $(-> $ret:ty)? $body:block) => {
@@ -4227,8 +4227,7 @@ fn gen_function_stub(cb: &mut CodeBlock, iseq_call: IseqCallRef) -> Result<CodeP
                 // The stub runs before any frame setup, so stack-passed arguments
                 // sit right above the return address (x86_64) or right at the
                 // native SP (arm64, where the return address is in a register).
-                let ret_addr_bytes = if cfg!(target_arch = "x86_64") { SIZEOF_VALUE_I32 } else { 0 };
-                asm.load_into(scratch_reg, Opnd::mem(64, NATIVE_STACK_PTR, ret_addr_bytes + slot as i32 * SIZEOF_VALUE_I32));
+                asm.load_into(scratch_reg, Opnd::mem(64, NATIVE_STACK_PTR, C_STACK_ARGS_ENTRY_OFFSET + slot as i32 * SIZEOF_VALUE_I32));
                 scratch_reg
             }
         };
@@ -4275,7 +4274,7 @@ pub fn gen_function_stub_hit_trampoline(cb: &mut CodeBlock) -> Result<CodePtr, C
             _ => unreachable!("chunks(2)")
         }
     }
-    if cfg!(target_arch = "x86_64") && ALLOC_REGS.len() % 2 == 1 {
+    if CPUSH_MISALIGNS_STACK && ALLOC_REGS.len() % 2 == 1 {
         asm.cpush(Opnd::Reg(ALLOC_REGS[0])); // maintain alignment for x86_64
     }
 
@@ -4291,7 +4290,7 @@ pub fn gen_function_stub_hit_trampoline(cb: &mut CodeBlock) -> Result<CodePtr, C
     asm.mov(scratch_reg, jump_addr);
 
     asm_comment!(asm, "restore argument registers");
-    if cfg!(target_arch = "x86_64") && ALLOC_REGS.len() % 2 == 1 {
+    if CPUSH_MISALIGNS_STACK && ALLOC_REGS.len() % 2 == 1 {
         asm.cpop_into(Opnd::Reg(ALLOC_REGS[0]));
     }
 

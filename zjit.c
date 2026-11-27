@@ -27,6 +27,10 @@
 #include "ractor_core.h"
 #include "shape.h"
 
+#if defined(__powerpc64__) && (!defined(_CALL_ELF) || _CALL_ELF != 2)
+# error ZJIT on 64-bit PowerPC requires the ELFv2 ABI
+#endif
+
 #ifndef _WIN32
 #include <sys/mman.h>
 #endif

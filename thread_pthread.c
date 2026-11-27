@@ -566,7 +566,10 @@ get_stack(void **addr, size_t *size)
     CHECK_ERR(pthread_attr_getstackaddr(&attr, addr));
     CHECK_ERR(pthread_attr_getstacksize(&attr, size));
 # endif
-# ifdef HAVE_PTHREAD_ATTR_GETGUARDSIZE
+# if defined(__GLIBC__) && defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 27)
+    /* glibc allocates the guard below the stack since 2.27, and
+     * does not count it in the size */
+# elif defined HAVE_PTHREAD_ATTR_GETGUARDSIZE
     CHECK_ERR(pthread_attr_getguardsize(&attr, &guard));
 # else
     guard = RB_THREAD_PAGE_SIZE;

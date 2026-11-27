@@ -734,6 +734,9 @@ A lot of work has gone into making Ractors more stable, performant, and usable. 
       `Struct` classes.
     * Instance variable reads and shareable constants are now compiled
       while multiple Ractors are running.
+* Platforms
+    * ZJIT now supports Linux on ppc64le CPUs (POWER8 or later).  It is not
+      built by default there.  Configure with `--enable-zjit`.
 * Command-line options
     * `--zjit-stats=FILE` writes stats as JSON when `FILE` ends with `.json`.
 * Ruby API

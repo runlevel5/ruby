@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::mem::take;
 use std::rc::Rc;
@@ -2625,6 +2625,18 @@ impl Assembler
         use crate::backend::parcopy;
         use crate::backend::current::{C_RET_OPND, SCRATCH_REG, NATIVE_STACK_PTR};
 
+        // Only an interval in an allocatable register can be a survivor. CCalls are visited
+        // in the order instructions are numbered, so keep the ones that have started and not
+        // yet ended in `active`, and each CCall only has to look at those.
+        let in_alloc_reg = |interval: &Interval| interval.assigned.get().and_then(|alloc| alloc.alloc_pool_index(alloc_regs)).is_some();
+        let mut by_start: Vec<&Interval> = intervals.iter()
+            .filter(|interval| interval.has_bounds() && in_alloc_reg(interval))
+            .collect();
+        by_start.sort_by_key(|interval| interval.start());
+        let mut next_to_start = 0;
+        let mut active: Vec<&Interval> = vec![];
+        let mut last_insn_number = 0;
+
         for block_id in self.block_order() {
             let block = &mut self.basic_blocks[block_id.0];
             let old_insns = take(&mut block.insns);
@@ -2643,16 +2655,6 @@ impl Assembler
                         && intervals[out.vreg_idx()].has_bounds()
                         && !intervals[out.vreg_idx()].is_dead();
 
-                    // Build a set of VRegIds that can be referenced by JITFrame for materializing the VM stack
-                    let stack_vreg_ids: HashSet<VRegId> = if let Some(StackMap { stack, .. }) = &stack_map {
-                        stack.iter().filter_map(|entry| match entry {
-                            StackMapEntry::Opnd(Opnd::VReg { idx, .. }) => Some(*idx),
-                            _ => None,
-                        }).collect()
-                    } else {
-                        HashSet::default()
-                    };
-
                     // Find survivors: intervals that are live across this Call
                     // instruction. We need to preserve the "surviving" registers
                     // past the ccall, so we're going to push them all on the
@@ -2662,22 +2664,37 @@ impl Assembler
                         out_vreg_id.is_none_or(|id| !intervals[id].has_bounds() || intervals[id].born_at(insn_number)),
                         "a CCall's output interval must start at the CCall"
                     );
-                    let survivors: Vec<VRegId> = intervals.iter()
-                        .filter(|interval| {
-                            // We need to spill register intervals on this CCall in two cases:
-                            // 1) The VReg is live across the CCall. The VReg this CCall
-                            //    defines is not one of them: its range starts here, so it
-                            //    holds no value yet and there is nothing to preserve.
-                            let live_across_call = Some(interval.vreg_id) != out_vreg_id
-                                && interval.covers(insn_number);
+                    // An instruction without an id counts as 0. Start over rather than go backwards.
+                    if insn_number < last_insn_number {
+                        next_to_start = 0;
+                        active.clear();
+                    }
+                    last_insn_number = insn_number;
+                    while let Some(interval) = by_start.get(next_to_start).filter(|interval| interval.start() <= insn_number) {
+                        active.push(interval);
+                        next_to_start += 1;
+                    }
+                    active.retain(|interval| insn_number < interval.end());
 
-                            // 2) The VReg is referenced by the stack map for the CCall
-                            let stack_map_reg = stack_vreg_ids.contains(&interval.vreg_id);
-                            let is_register = interval.assigned.get().and_then(|alloc| alloc.alloc_pool_index(alloc_regs)).is_some();
-                            is_register && (live_across_call || stack_map_reg)
-                        })
+                    // We need to spill register intervals on this CCall in two cases:
+                    // 1) The VReg is live across the CCall. The VReg this CCall
+                    //    defines is not one of them: its range starts here, so it
+                    //    holds no value yet and there is nothing to preserve.
+                    let mut survivors: Vec<VRegId> = active.iter()
+                        .filter(|interval| Some(interval.vreg_id) != out_vreg_id && interval.covers(insn_number))
                         .map(|interval| interval.vreg_id)
                         .collect();
+                    // 2) The VReg is referenced by the stack map for the CCall, which JITFrame
+                    //    uses for materializing the VM stack
+                    if let Some(StackMap { stack, .. }) = &stack_map {
+                        survivors.extend(stack.iter().filter_map(|entry| match entry {
+                            StackMapEntry::Opnd(Opnd::VReg { idx, .. }) if in_alloc_reg(&intervals[*idx]) => Some(*idx),
+                            _ => None,
+                        }));
+                    }
+                    // In the order of `intervals`, which the survivor slots follow
+                    survivors.sort_unstable();
+                    survivors.dedup();
 
                     let survivor_regs: Vec<Opnd> = survivors.iter()
                         .map(|&s| Opnd::Reg(intervals[s].assigned.get().unwrap().assigned_reg(alloc_regs).unwrap()))

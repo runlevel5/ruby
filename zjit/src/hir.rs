@@ -7013,13 +7013,18 @@ impl Function {
 
     fn optimize_load_store(&mut self) {
         for block in self.reverse_post_order() {
-            let mut compile_time_heap: HashMap<(InsnId, i32), InsnId>  = HashMap::new();
+            // Keyed by receiver, offset and width. The width keeps apart fields that start at
+            // the same offset, as RBasic's flags and shape ID do on big-endian.
+            let mut compile_time_heap: HashMap<(InsnId, i32, u8), InsnId>  = HashMap::new();
+            let is_rbasic_flags = |&(_, offset, num_bits): &(InsnId, i32, u8)| {
+                offset == RUBY_OFFSET_RBASIC_FLAGS && num_bits == types::CUInt64.num_bits()
+            };
             let old_insns = std::mem::take(&mut self.blocks[block].insns);
             let mut new_insns = Vec::with_capacity(old_insns.len());
             for insn_id in old_insns {
                 let replacement_insn: InsnId = match self.resolve(insn_id).insn(self) {
-                    &Insn::StoreField { recv, offset, val, .. } => {
-                        let key = (self.chase_insn(recv), offset);
+                    &Insn::StoreField { recv, offset, val, num_bits, .. } => {
+                        let key = (self.chase_insn(recv), offset, num_bits);
                         let heap_entry = compile_time_heap.get(&key).copied();
                         // TODO(Jacob): Switch from actual to partial equality
                         if Some(val) == heap_entry {
@@ -7027,12 +7032,12 @@ impl Function {
                             continue
                         }
                         // TODO(Jacob): Add TBAA to avoid removing so many entries
-                        compile_time_heap.retain(|(_, off), _| *off != offset);
+                        compile_time_heap.retain(|(_, off, _), _| *off != offset);
                         compile_time_heap.insert(key, val);
                         insn_id
                     },
-                    &Insn::LoadField { recv, offset, return_type, .. } => {
-                        let key = (self.chase_insn(recv), offset);
+                    &Insn::LoadField { recv, offset, return_type, num_bits, .. } => {
+                        let key = (self.chase_insn(recv), offset, num_bits);
                         match compile_time_heap.entry(key) {
                             std::collections::hash_map::Entry::Occupied(entry) => {
                                 let cached_insn = *entry.get();
@@ -7066,15 +7071,13 @@ impl Function {
                         // array's flags, but the current effects system lumps flags in with other
                         // memory writes, so we manually exclude the flags from invalidation for
                         // now.
-                        let offset = RUBY_OFFSET_RBASIC_FLAGS;
-                        compile_time_heap.retain(|(_, off), _| *off == offset);
+                        compile_time_heap.retain(|key, _| is_rbasic_flags(key));
                         insn_id
                     }
                     &Insn::WriteBarrier { .. } | &Insn::StringCoderange { .. } => {
                         // Both operations may update object flags. We must invalidate cached flag
                         // bits loads until the effect system can model individual fields.
-                        let offset = RUBY_OFFSET_RBASIC_FLAGS;
-                        compile_time_heap.retain(|(_, off), _| *off != offset);
+                        compile_time_heap.retain(|key, _| !is_rbasic_flags(key));
                         insn_id
                     },
                     insn => {
@@ -7685,7 +7688,8 @@ impl Function {
     }
 
     /// Clean up linked lists of blocks A -> B -> C into A (with B's and C's instructions).
-    fn clean_cfg(&mut self) {
+    /// Returns true if any block was absorbed, in which case types have been inferred again.
+    fn clean_cfg(&mut self) -> bool {
         // num_in_edges is invariant throughout cleaning the CFG:
         // * we don't allocate new blocks
         // * blocks that get absorbed are not in RPO anymore
@@ -7714,6 +7718,7 @@ impl Function {
         if changed {
             crate::stats::trace_compile_phase("infer_types", || self.infer_types());
         }
+        changed
     }
 
     /// Remove duplicate PatchPoint instructions within each basic block.
@@ -8159,7 +8164,12 @@ impl Function {
             run_pass!(optimize_load_store);
             run_pass!(canonicalize);
             run_pass!(fold_constants);
-            run_pass!(clean_cfg);
+            // Absorbing a block infers types again, which can decide a branch that
+            // fold_constants has already seen. Fold it before the next pass or codegen
+            // sees the block it leads to, which infer_types has left untyped.
+            while run_pass!(clean_cfg) {
+                run_pass!(fold_constants);
+            }
             run_pass!(remove_redundant_patch_points);
             run_pass!(remove_duplicate_check_interrupts);
             if has_ever_inlined {
@@ -8697,6 +8707,10 @@ impl Function {
             | Insn::FixnumRShift { left, right, .. } => {
                 self.assert_subtype(insn_id, left, types::Fixnum)?;
                 self.assert_subtype(insn_id, right, types::Fixnum)?;
+                // infer_types leaves an unreachable block's instructions Empty.
+                if self.type_of(right).is_subtype(types::Empty) {
+                    return Ok(());
+                }
                 let Some(obj) = self.type_of(right).fixnum_value() else {
                     return Err(ValidationError::MismatchedOperandType(insn_id, right, "<a compile-time constant>".into(), "<unknown>".into()));
                 };
@@ -12281,6 +12295,33 @@ mod validation_tests {
             let last = *function.blocks[entry].insns.last().unwrap();
             assert!(matches!(function.find_ref(last), Insn::Unreachable),
                 "expected entry terminator to fold to Unreachable");
+        });
+    }
+
+    // A shift left behind in a block that `infer_types` no longer reaches has an
+    // `Empty` shift amount until `fold_constants` and `clean_cfg` remove the block.
+    #[test]
+    fn shift_in_unreachable_block_validates() {
+        let mut function = Function::new(std::ptr::null());
+        let entry = function.entry_block;
+        let if_true = function.new_block(0);
+        let if_false = function.new_block(0);
+        let val = function.push_insn(entry, Insn::Const { val: Const::Value(VALUE::fixnum_from_usize(8)) });
+        function.push_insn(entry, Insn::CondBranchHasType(Box::new(CondBranchHasTypeData {
+            val,
+            expected: types::Fixnum,
+            if_true: BranchEdge { target: if_true, args: vec![] },
+            if_false: BranchEdge { target: if_false, args: vec![] },
+        })));
+        function.push_insn(if_true, Insn::Return { val });
+        let amount = function.push_insn(if_false, Insn::Const { val: Const::Value(VALUE::fixnum_from_usize(1)) });
+        let shifted = function.push_insn(if_false, Insn::FixnumRShift { left: val, right: amount });
+        function.push_insn(if_false, Insn::Return { val: shifted });
+        function.seal_entries();
+        crate::cruby::with_rubyvm(|| {
+            function.infer_types();
+            assert!(function.type_of(amount).bit_equal(types::Empty), "if_false should be unreachable");
+            assert!(function.validate().is_ok());
         });
     }
 

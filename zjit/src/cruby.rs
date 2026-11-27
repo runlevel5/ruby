@@ -1042,7 +1042,7 @@ pub fn iseq_get_location(iseq: IseqPtr, pos: u32) -> String {
 }
 
 pub fn ruby_str_to_rust_string_result(v: VALUE) -> Result<String, std::string::FromUtf8Error> {
-    let str_ptr = unsafe { rb_RSTRING_PTR(v) } as *mut u8;
+    let str_ptr = unsafe { rb_RSTRING_PTR(v) } as *const u8;
     let str_len: usize = unsafe { rb_RSTRING_LEN(v) }.try_into().unwrap();
     let str_slice: &[u8] = unsafe { std::slice::from_raw_parts(str_ptr, str_len) };
     String::from_utf8(str_slice.to_vec())

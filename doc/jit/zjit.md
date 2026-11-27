@@ -7,12 +7,13 @@
 ZJIT is a method-based just-in-time (JIT) compiler for Ruby. It uses profile
 information from the interpreter to guide optimization in the compiler.
 
-ZJIT is currently supported for macOS, Linux and BSD on x86-64 and arm64/aarch64 CPUs.
+ZJIT is currently supported for macOS, Linux and BSD on x86-64 and arm64/aarch64 CPUs,
+and for Linux on 64-bit PowerPC CPUs (POWER8 or later, ELFv2 ABI).
 This project is open source and falls under the same license as CRuby.
 
 ## Current Limitations
 
-ZJIT may not be suitable for certain applications. It currently only supports macOS, Linux and BSD on x86-64 and arm64/aarch64 CPUs. ZJIT will use more memory than the Ruby interpreter because the JIT compiler needs to generate machine code in memory and maintain additional state information.
+ZJIT may not be suitable for certain applications. It currently only supports macOS, Linux and BSD on x86-64 and arm64/aarch64 CPUs, and Linux on 64-bit PowerPC CPUs. ZJIT will use more memory than the Ruby interpreter because the JIT compiler needs to generate machine code in memory and maintain additional state information.
 You can change how much executable memory is allocated using [ZJIT's command-line options](rdoc-ref:@Command-Line+Options).
 
 ## Contributing
@@ -52,6 +53,9 @@ ZJIT.
 Refer to [Building Ruby](rdoc-ref:contributing/building_ruby.md) for general build prerequisites.
 Additionally, ZJIT requires Rust 1.85.0 or later. Release builds need only `rustc`. Development
 builds require `cargo` and may download dependencies. GNU Make is required.
+
+On x86-64 and arm64/aarch64, `configure` enables ZJIT when it finds a suitable `rustc`.
+On 64-bit PowerPC, ZJIT is only built when `--enable-zjit` is given.
 
 ### For normal use
 
