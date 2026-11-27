@@ -6,7 +6,6 @@ use crate::backend::lir::*;
 use crate::options::asm_dump;
 use crate::stats::{CompileError, trace_compile_phase};
 use crate::virtualmem::CodePtr;
-use crate::cast::*;
 
 // Use the PPC64 register type for this platform
 pub type Reg = PPC64Reg;
@@ -182,9 +181,23 @@ fn emit_jmp_ptr(cb: &mut CodeBlock, dst_ptr: CodePtr) {
     if b_offset_fits(offset) {
         b(cb, offset);
     } else {
-        emit_load_value(cb, Assembler::EMIT_OPND, dst_ptr.raw_addr(cb) as u64);
+        emit_load_code_ptr(cb, Assembler::EMIT_OPND, dst_ptr);
         mtctr(cb, Assembler::EMIT_OPND);
         bctr(cb);
+    }
+}
+
+/// Emit the instructions to put the address of some place in the code region into the
+/// given register. Returns how many words they take, like [`emit_load_value`].
+fn emit_load_code_ptr(cb: &mut CodeBlock, rd: PPC64Opnd, dst_ptr: CodePtr) -> usize {
+    if power_isa() >= PowerIsa::V3_1 {
+        // The offset of pla reaches +/-8GiB, which is more than the code region can be
+        let start_pos = cb.get_write_pos();
+        align_prefixed(cb);
+        pla(cb, rd, dst_ptr.as_offset() - cb.get_write_ptr().as_offset());
+        (cb.get_write_pos() - start_pos) / 4
+    } else {
+        emit_load_value(cb, rd, dst_ptr.raw_addr(cb) as u64)
     }
 }
 
@@ -920,7 +933,7 @@ impl Assembler {
                     // that if it doesn't match it will skip over the
                     // instructions used for branching.
                     bc(cb, condition.inverse(), (LOAD_INSNS as i64 + 3) * 4);
-                    let load_insns = emit_load_value(cb, Assembler::EMIT_OPND, dst_ptr.raw_addr(cb) as u64);
+                    let load_insns = emit_load_code_ptr(cb, Assembler::EMIT_OPND, dst_ptr);
                     (load_insns..LOAD_INSNS).for_each(|_| nop(cb));
                     mtctr(cb, Assembler::EMIT_OPND);
                     bctr(cb);
@@ -1154,10 +1167,20 @@ impl Assembler {
             } else {
                 // A C function expects its own address in r12 when called through
                 // its global entry point, to find its TOC with.
-                const LOAD_INSNS: usize = 5;
-                let load_insns = emit_load_value(cb, R12, dst_addr);
-                if rewritable {
-                    (load_insns..LOAD_INSNS).for_each(|_| nop(cb));
+                let offset = dst_addr as i64 - cb.get_write_ptr().raw_addr(cb) as i64;
+                // (Aligning a prefixed instruction may move it by a word.)
+                if power_isa() >= PowerIsa::V3_1 && prefixed_imm_fits(offset) && prefixed_imm_fits(offset - 4) {
+                    // The offset of pla reaches +/-8GiB, which is all of the code region
+                    // and often the functions of the executable. Where it is, it takes up
+                    // the same room no matter what the address is.
+                    align_prefixed(cb);
+                    pla(cb, R12, dst_addr as i64 - cb.get_write_ptr().raw_addr(cb) as i64);
+                } else {
+                    const LOAD_INSNS: usize = 5;
+                    let load_insns = emit_load_value(cb, R12, dst_addr);
+                    if rewritable {
+                        (load_insns..LOAD_INSNS).for_each(|_| nop(cb));
+                    }
                 }
                 mtctr(cb, R12);
                 bctrl(cb);
@@ -1497,9 +1520,7 @@ impl Assembler {
                         });
                     } else {
                         // Set output to the jump target's raw address
-                        let target_code = target.unwrap_code_ptr();
-                        let target_addr = target_code.raw_addr(cb).as_u64();
-                        emit_load_value(cb, out.into(), target_addr);
+                        emit_load_code_ptr(cb, out.into(), target.unwrap_code_ptr());
                     }
                 },
                 Insn::CPush(opnd) => {
@@ -2364,6 +2385,37 @@ mod tests {
     }
 
     #[test]
+    fn test_emit_jumps_out_of_b_range_isa_3_1() {
+        TEST_POWER_ISA.set(PowerIsa::V3_1);
+        let (mut asm, _) = setup_asm();
+        let mut cb = CodeBlock::new_dummy_sized(128 * 1024 * 1024);
+
+        // pla, which is .byte and li, gets the address from how far away it is.
+        // The one for the conditional jump is still padded for bne to know how
+        // far to skip.
+        let target = cb.get_write_ptr().add_bytes(1 << 26);
+        asm.jmp(Target::CodePtr(target));
+        asm.push_insn(Insn::Je(Target::CodePtr(target)));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: .byte 0x00, 0x04, 0x10, 0x06
+        0x4: li r0, 0
+        0x8: mtctr r0
+        0xc: bctr
+        0x10: bne 0x30
+        0x14: .byte 0xff, 0x03, 0x10, 0x06
+        0x18: li r0, -0x14
+        0x1c: nop
+        0x20: nop
+        0x24: nop
+        0x28: mtctr r0
+        0x2c: bctr
+        ");
+        assert_snapshot!(cb.hexdump(), @"0004100600000038a603097c2004804e20008240ff031006ecff0038000000600000006000000060a603097c2004804e");
+    }
+
+    #[test]
     fn test_emit_jmp_ptr() {
         let (mut asm, mut cb) = setup_asm();
 
@@ -3149,6 +3201,36 @@ mod tests {
         0x10: stdu r0, 0x50(r1)
         ");
         assert_snapshot!(cb.hexdump(), @"000001e8b1ff01f8f9000048000001e8510001f8");
+    }
+
+    #[test]
+    fn test_ccall_jit_code_in_large_region_isa_3_1() {
+        TEST_POWER_ISA.set(PowerIsa::V3_1);
+
+        // pla, which is .byte and li, takes up the same room no matter the address
+        let compile = |target_offset: usize| {
+            let (mut asm, _) = setup_asm();
+            let mut cb = CodeBlock::new_dummy_sized(128 * 1024 * 1024);
+            let target = cb.get_write_ptr().add_bytes(target_offset);
+            asm.ccall(target.raw_ptr(&cb), vec![]);
+            asm.compile_with_num_regs(&mut cb, 0);
+            cb
+        };
+
+        let near = compile(0);
+        let far = compile(1 << 26);
+        assert_eq!(near.get_write_pos(), far.get_write_pos());
+        assert_disasm_snapshot!(far.disasm(), @"
+        0x0: ld r0, 0(r1)
+        0x4: stdu r0, -0x50(r1)
+        0x8: .byte 0xff, 0x03, 0x10, 0x06
+        0xc: li r12, -8
+        0x10: mtctr r12
+        0x14: bctrl
+        0x18: ld r0, 0(r1)
+        0x1c: stdu r0, 0x50(r1)
+        ");
+        assert_snapshot!(far.hexdump(), @"000001e8b1ff01f8ff031006f8ff8039a603897d2104804e000001e8510001f8");
     }
 
     #[test]
