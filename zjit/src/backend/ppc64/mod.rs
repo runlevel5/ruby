@@ -48,6 +48,8 @@ enum PowerIsa {
     V2_07,
     /// What POWER9 implements
     V3_0,
+    /// What POWER10 implements
+    V3_1,
 }
 
 /// The newest version of the Power ISA that the CPU we are running on implements
@@ -61,11 +63,14 @@ fn power_isa() -> PowerIsa {
     }
     const AT_HWCAP2: c_ulong = 26;
     const PPC_FEATURE2_ARCH_3_00: c_ulong = 0x0080_0000;
+    const PPC_FEATURE2_ARCH_3_1: c_ulong = 0x0004_0000;
 
     static ISA: OnceLock<PowerIsa> = OnceLock::new();
     *ISA.get_or_init(|| {
         let hwcap2 = unsafe { getauxval(AT_HWCAP2) };
-        if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 {
+        if hwcap2 & PPC_FEATURE2_ARCH_3_1 != 0 {
+            PowerIsa::V3_1
+        } else if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 {
             PowerIsa::V3_0
         } else {
             PowerIsa::V2_07
@@ -186,6 +191,7 @@ fn emit_jmp_ptr(cb: &mut CodeBlock, dst_ptr: CodePtr) {
 /// Emit the required instructions to load the given value into the
 /// given register. Our goal here is to use as few instructions as
 /// possible to get this value into the register.
+/// Returns how many words they take.
 fn emit_load_value(cb: &mut CodeBlock, rd: PPC64Opnd, value: u64) -> usize {
     let imm = value as i64;
 
@@ -205,6 +211,13 @@ fn emit_load_value(cb: &mut CodeBlock, rd: PPC64Opnd, value: u64) -> usize {
             ori(cb, rd, rd, PPC64Opnd::new_uimm(lower.into()));
             2
         }
+    } else if power_isa() >= PowerIsa::V3_1 && prefixed_imm_fits(imm) {
+        // ISA 3.1 has an instruction for an immediate of 34 bits,
+        // which takes at least 3 instructions below.
+        let start_pos = cb.get_write_pos();
+        align_prefixed(cb);
+        pli(cb, rd, imm);
+        (cb.get_write_pos() - start_pos) / 4
     } else {
         // Finally we'll fall back to loading the upper 32 bits
         // like above, shifting them into place, and filling in
@@ -1998,6 +2011,57 @@ mod tests {
         0x34: ori r3, r3, 1
         ");
         assert_snapshot!(cb.hexdump(), @"01006038c6076378ff7f6038c607637834126364785663603412603c78566360c6076378bc9a6364f0de6360ffff6038c607637801006360");
+    }
+
+    #[test]
+    fn test_emit_load_value_isa_3_1() {
+        TEST_POWER_ISA.set(PowerIsa::V3_1);
+        let (mut asm, mut cb) = setup_asm();
+
+        // pli is for what takes more than 2 instructions and fits in 34 bits.
+        // (Capstone doesn't decode prefixed instructions. .byte is the prefix, and
+        // what follows is the suffix, which has the low 16 bits of the immediate.)
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1234_5678));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0xffff_ffff));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1_ffff_ffff));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::Imm(-0x2_0000_0000));
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x2_0000_0000));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: lis r3, 0x1234
+        0x4: ori r3, r3, 0x5678
+        0x8: .byte 0xff, 0xff, 0x00, 0x06
+        0xc: li r3, -1
+        0x10: .byte 0xff, 0xff, 0x01, 0x06
+        0x14: li r3, -1
+        0x18: .byte 0x00, 0x00, 0x02, 0x06
+        0x1c: li r3, 0
+        0x20: li r3, 2
+        0x24: sldi r3, r3, 0x20
+        ");
+        assert_snapshot!(cb.hexdump(), @"3412603c78566360ffff0006ffff6038ffff0106ffff6038000002060000603802006038c6076378");
+    }
+
+    #[test]
+    fn test_emit_prefixed_at_64_byte_boundary() {
+        TEST_POWER_ISA.set(PowerIsa::V3_1);
+        let (mut asm, mut cb) = setup_asm();
+
+        // A prefixed instruction must not cross a 64-byte boundary, so a nop goes
+        // in the last word before one
+        for _ in 0..15 {
+            asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0));
+        }
+        asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1_0000_0000));
+        asm.compile_with_num_regs(&mut cb, 0);
+
+        assert_disasm_snapshot!(cb.disasm().lines().skip(15).collect::<Vec<_>>().join("\n"), @"
+        0x3c: nop
+        0x40: .byte 0x00, 0x00, 0x01, 0x06
+        0x44: li r3, 0
+        ");
+        assert_eq!(18 * 4, cb.get_write_pos());
     }
 
     #[test]
