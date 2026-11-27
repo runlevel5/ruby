@@ -1044,14 +1044,20 @@ impl Assembler {
             // back out to the gc_offsets list.
             //
             // The value lives in the code, where GC can update it, and we jump
-            // over it. There is no PC-relative load, so load it through its address.
+            // over it. Before ISA 3.1, there is no PC-relative load, so load it
+            // through its address.
             b(cb, 4 + (SIZEOF_VALUE as i64));
             let value_ptr = cb.get_write_ptr();
             cb.write_bytes(&value.as_u64().to_le_bytes());
             gc_offsets.push(value_ptr);
 
-            emit_load_value(cb, dest, value_ptr.raw_addr(cb) as u64);
-            ld(cb, dest, PPC64Opnd::new_mem(64, dest, 0));
+            if power_isa() >= PowerIsa::V3_1 {
+                align_prefixed(cb);
+                pld_pc_relative(cb, dest, value_ptr.as_offset() - cb.get_write_ptr().as_offset());
+            } else {
+                emit_load_value(cb, dest, value_ptr.raw_addr(cb) as u64);
+                ld(cb, dest, PPC64Opnd::new_mem(64, dest, 0));
+            }
         }
 
         /// Return the register that an operand is in. An immediate is loaded into EMIT_OPND first.
@@ -2062,6 +2068,28 @@ mod tests {
         0x44: li r3, 0
         ");
         assert_eq!(18 * 4, cb.get_write_pos());
+    }
+
+    #[test]
+    fn test_emit_load_gc_value_isa_3_1() {
+        TEST_POWER_ISA.set(PowerIsa::V3_1);
+        let (mut asm, mut cb) = setup_asm();
+
+        // The value is in the code for GC to update, and pld reads it from there.
+        // (The two .byte after it are pld.)
+        let opnd = asm.load(Opnd::Value(VALUE(0xCAFECAFECAFE0000)));
+        asm.store(Opnd::mem(64, SP, 0), opnd);
+        asm.compile_with_num_regs(&mut cb, 1);
+
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: b 0xc
+        0x4: lfd f23, 0(r30)
+        0x8: lfd f23, -0x3502(r30)
+        0xc: .byte 0xff, 0xff, 0x13, 0x04
+        0x10: .byte 0xf8, 0xff, 0x60, 0xe4
+        0x14: std r3, 0(r30)
+        ");
+        assert_snapshot!(cb.hexdump(), @"0c0000480000fecafecafecaffff1304f8ff60e400007ef8");
     }
 
     #[test]
