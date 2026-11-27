@@ -112,6 +112,42 @@ pub fn nop(cb: &mut CodeBlock) {
     cb.write_bytes(&bytes);
 }
 
+/// Whether a signed value fits in the immediate of a prefixed instruction
+pub const fn prefixed_imm_fits(imm: i64) -> bool {
+    let limit = 1 << (PrefixedDForm::IMM_BITS - 1);
+    -limit <= imm && imm < limit
+}
+
+/// Emit a nop if a prefixed instruction would cross a 64-byte boundary at the write
+/// position, which it must not. Code memory starts at a page boundary, so the write
+/// position is as far into a 64-byte block as the address is.
+pub fn align_prefixed(cb: &mut CodeBlock) {
+    if cb.get_write_pos() % 64 == 60 {
+        nop(cb);
+    }
+}
+
+/// Write a prefixed instruction, which [`align_prefixed`] has to come before
+fn write_prefixed(cb: &mut CodeBlock, bytes: [u8; 8]) {
+    assert!(cb.get_write_pos() % 64 != 60, "a prefixed instruction must not cross a 64-byte boundary");
+    cb.write_bytes(&bytes);
+}
+
+/// PLI - put a sign-extended 34-bit immediate in rt. Needs ISA 3.1.
+pub fn pli(cb: &mut CodeBlock, rt: PPC64Opnd, imm: i64) {
+    write_prefixed(cb, PrefixedDForm::paddi(reg_no(rt), 0, imm, false).into());
+}
+
+/// PLA - put the address that is offset bytes away from this instruction in rt. Needs ISA 3.1.
+pub fn pla(cb: &mut CodeBlock, rt: PPC64Opnd, offset: i64) {
+    write_prefixed(cb, PrefixedDForm::paddi(reg_no(rt), 0, offset, true).into());
+}
+
+/// PLD - load the doubleword that is offset bytes away from this instruction into rt. Needs ISA 3.1.
+pub fn pld_pc_relative(cb: &mut CodeBlock, rt: PPC64Opnd, offset: i64) {
+    write_prefixed(cb, PrefixedDForm::pld(reg_no(rt), 0, offset, true).into());
+}
+
 /// LBZ - load a byte from memory into rt, zero-extended
 pub fn lbz(cb: &mut CodeBlock, rt: PPC64Opnd, mem: PPC64Opnd) {
     let (ra, disp) = mem_d(mem);
@@ -1391,6 +1427,63 @@ mod tests {
         let cb = compile(mcrxrx);
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mcrxrx cr0");
         assert_snapshot!(cb.hexdump(), @"8004007c");
+    }
+
+    #[test]
+    fn test_prefixed_imm_fits() {
+        assert!(prefixed_imm_fits((1 << 33) - 1));
+        assert!(!prefixed_imm_fits(1 << 33));
+        assert!(prefixed_imm_fits(-(1 << 33)));
+        assert!(!prefixed_imm_fits(-(1 << 33) - 1));
+    }
+
+    #[test]
+    fn test_align_prefixed() {
+        let cb = compile(|cb| {
+            // Nothing to do until the last word of a 64-byte block
+            for _ in 0..15 {
+                align_prefixed(cb);
+                nop(cb);
+            }
+            assert_eq!(60, cb.get_write_pos());
+            align_prefixed(cb);
+            assert_eq!(64, cb.get_write_pos());
+            pli(cb, R3, 0);
+        });
+        assert_eq!(72, cb.get_write_pos());
+    }
+
+    #[test]
+    fn test_pli() {
+        let cb = compile(|cb| pli(cb, R3, 0x106a20340));
+        // Capstone doesn't decode prefixed instructions
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: .byte 0xa2, 0x06, 0x01, 0x06
+        0x4: li r3, 0x340
+        ");
+        assert_snapshot!(cb.hexdump(), @"a206010640036038");
+    }
+
+    #[test]
+    fn test_pla() {
+        let cb = compile(|cb| pla(cb, R12, -0x23456));
+        // Capstone doesn't decode prefixed instructions
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: .byte 0xfd, 0xff, 0x13, 0x06
+        0x4: li r12, -0x3456
+        ");
+        assert_snapshot!(cb.hexdump(), @"fdff1306aacb8039");
+    }
+
+    #[test]
+    fn test_pld_pc_relative() {
+        let cb = compile(|cb| pld_pc_relative(cb, R5, 0x12345));
+        // Capstone doesn't decode prefixed instructions
+        assert_disasm_snapshot!(cb.disasm(), @"
+        0x0: .byte 0x01, 0x00, 0x10, 0x04
+        0x4: .byte 0x45, 0x23, 0xa0, 0xe4
+        ");
+        assert_snapshot!(cb.hexdump(), @"010010044523a0e4");
     }
 
     #[test]
