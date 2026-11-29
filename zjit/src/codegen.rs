@@ -2311,7 +2311,7 @@ fn gen_string_copy(jit: &mut JITState, asm: &mut Assembler, function: &Function,
         |asm, obj| {
             asm.store(Opnd::mem(VALUE_BITS, obj, RUBY_OFFSET_RSTRING_LEN), Opnd::Imm(len));
             for (i, chunk) in string_bytes.chunks_exact(8).enumerate() {
-                let word = u64::from_le_bytes(chunk.try_into().unwrap());
+                let word = u64::from_ne_bytes(chunk.try_into().unwrap());
                 let offset = RUBY_OFFSET_RSTRING_AS_ARY + (i as i32) * 8;
                 asm.store(Opnd::mem(64, obj, offset), Opnd::UImm(word));
             }
