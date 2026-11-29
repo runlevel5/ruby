@@ -55,7 +55,7 @@ impl From<BForm> for [u8; 4] {
     /// Convert an instruction into a 4 byte array.
     fn from(inst: BForm) -> [u8; 4] {
         let result: u32 = inst.into();
-        result.to_le_bytes()
+        result.to_ne_bytes()
     }
 }
 

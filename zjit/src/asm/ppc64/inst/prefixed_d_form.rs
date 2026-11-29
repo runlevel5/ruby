@@ -74,8 +74,8 @@ impl From<PrefixedDForm> for [u8; 8] {
     fn from(inst: PrefixedDForm) -> [u8; 8] {
         let [prefix, suffix]: [u32; 2] = inst.into();
         let mut bytes = [0; 8];
-        bytes[..4].copy_from_slice(&prefix.to_le_bytes());
-        bytes[4..].copy_from_slice(&suffix.to_le_bytes());
+        bytes[..4].copy_from_slice(&prefix.to_ne_bytes());
+        bytes[4..].copy_from_slice(&suffix.to_ne_bytes());
         bytes
     }
 }

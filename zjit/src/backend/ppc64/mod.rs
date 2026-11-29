@@ -1061,7 +1061,7 @@ impl Assembler {
             // through its address.
             b(cb, 4 + (SIZEOF_VALUE as i64));
             let value_ptr = cb.get_write_ptr();
-            cb.write_bytes(&value.as_u64().to_le_bytes());
+            cb.write_bytes(&value.as_u64().to_ne_bytes());
             gc_offsets.push(value_ptr);
 
             if power_isa() >= PowerIsa::V3_1 {
