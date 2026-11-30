@@ -1065,7 +1065,11 @@ rb_shape_get_iv_index(shape_id_t shape_id, ID id, attr_index_t *value)
 int32_t
 rb_shape_id_offset(void)
 {
+#ifdef WORDS_BIGENDIAN
+    return 0;
+#else
     return sizeof(uintptr_t) - SHAPE_ID_NUM_BITS / sizeof(uintptr_t);
+#endif
 }
 
 // Rebuild a similar shape with the same ivars but without "non-canonical"
