@@ -944,7 +944,7 @@ mod tests {
     fn test_addo() {
         let cb = compile(|cb| addo(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
-        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x14, 0x2e, 0x64, 0x7c");
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642e14");
         assert_snapshot!(cb.hexdump(), @"142e647c");
     }
 
@@ -952,7 +952,7 @@ mod tests {
     fn test_subfo() {
         let cb = compile(|cb| subfo(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
-        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x50, 0x2c, 0x64, 0x7c");
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642c50");
         assert_snapshot!(cb.hexdump(), @"502c647c");
     }
 
@@ -960,7 +960,7 @@ mod tests {
     fn test_mulldo() {
         let cb = compile(|cb| mulldo(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
-        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0xd2, 0x2d, 0x64, 0x7c");
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642dd2");
         assert_snapshot!(cb.hexdump(), @"d22d647c");
     }
 
@@ -968,7 +968,7 @@ mod tests {
     fn test_addo_dot() {
         let cb = compile(|cb| addo_dot(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
-        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x15, 0x2e, 0x64, 0x7c");
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642e15");
         assert_snapshot!(cb.hexdump(), @"152e647c");
     }
 
@@ -976,7 +976,7 @@ mod tests {
     fn test_subfo_dot() {
         let cb = compile(|cb| subfo_dot(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
-        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0x51, 0x2c, 0x64, 0x7c");
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642c51");
         assert_snapshot!(cb.hexdump(), @"512c647c");
     }
 
@@ -984,7 +984,7 @@ mod tests {
     fn test_mulldo_dot() {
         let cb = compile(|cb| mulldo_dot(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
-        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .byte 0xd3, 0x2d, 0x64, 0x7c");
+        assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642dd3");
         assert_snapshot!(cb.hexdump(), @"d32d647c");
     }
 
@@ -1458,7 +1458,7 @@ mod tests {
         let cb = compile(|cb| pli(cb, R3, 0x106a20340));
         // Capstone doesn't decode prefixed instructions
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: .byte 0xa2, 0x06, 0x01, 0x06
+        0x0: .long 0x060106a2
         0x4: li r3, 0x340
         ");
         assert_snapshot!(cb.hexdump(), @"a206010640036038");
@@ -1469,7 +1469,7 @@ mod tests {
         let cb = compile(|cb| pla(cb, R12, -0x23456));
         // Capstone doesn't decode prefixed instructions
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: .byte 0xfd, 0xff, 0x13, 0x06
+        0x0: .long 0x0613fffd
         0x4: li r12, -0x3456
         ");
         assert_snapshot!(cb.hexdump(), @"fdff1306aacb8039");
@@ -1480,8 +1480,8 @@ mod tests {
         let cb = compile(|cb| pld_pc_relative(cb, R5, 0x12345));
         // Capstone doesn't decode prefixed instructions
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: .byte 0x01, 0x00, 0x10, 0x04
-        0x4: .byte 0x45, 0x23, 0xa0, 0xe4
+        0x0: .long 0x04100001
+        0x4: .long 0xe4a02345
         ");
         assert_snapshot!(cb.hexdump(), @"010010044523a0e4");
     }

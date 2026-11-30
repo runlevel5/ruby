@@ -2046,7 +2046,7 @@ mod tests {
         let (mut asm, mut cb) = setup_asm();
 
         // pli is for what takes more than 2 instructions and fits in 34 bits.
-        // (Capstone doesn't decode prefixed instructions. .byte is the prefix, and
+        // (Capstone doesn't decode prefixed instructions. .long is the prefix, and
         // what follows is the suffix, which has the low 16 bits of the immediate.)
         asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0x1234_5678));
         asm.mov(Opnd::Reg(R3_REG), Opnd::UImm(0xffff_ffff));
@@ -2058,11 +2058,11 @@ mod tests {
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: lis r3, 0x1234
         0x4: ori r3, r3, 0x5678
-        0x8: .byte 0xff, 0xff, 0x00, 0x06
+        0x8: .long 0x0600ffff
         0xc: li r3, -1
-        0x10: .byte 0xff, 0xff, 0x01, 0x06
+        0x10: .long 0x0601ffff
         0x14: li r3, -1
-        0x18: .byte 0x00, 0x00, 0x02, 0x06
+        0x18: .long 0x06020000
         0x1c: li r3, 0
         0x20: li r3, 2
         0x24: sldi r3, r3, 0x20
@@ -2085,7 +2085,7 @@ mod tests {
 
         assert_disasm_snapshot!(cb.disasm().lines().skip(15).collect::<Vec<_>>().join("\n"), @"
         0x3c: nop
-        0x40: .byte 0x00, 0x00, 0x01, 0x06
+        0x40: .long 0x06010000
         0x44: li r3, 0
         ");
         assert_eq!(18 * 4, cb.get_write_pos());
@@ -2097,7 +2097,7 @@ mod tests {
         let (mut asm, mut cb) = setup_asm();
 
         // The value is in the code for GC to update, and pld reads it from there.
-        // (The two .byte after it are pld.)
+        // (The two .long after it are pld.)
         let opnd = asm.load(Opnd::Value(VALUE(0xCAFECAFECAFE0000)));
         asm.store(Opnd::mem(64, SP, 0), opnd);
         asm.compile_with_num_regs(&mut cb, 1);
@@ -2106,8 +2106,8 @@ mod tests {
         0x0: b 0xc
         0x4: lfd f23, 0(r30)
         0x8: lfd f23, -0x3502(r30)
-        0xc: .byte 0xff, 0xff, 0x13, 0x04
-        0x10: .byte 0xf8, 0xff, 0x60, 0xe4
+        0xc: .long 0x0413ffff
+        0x10: .long 0xe460fff8
         0x14: std r3, 0(r30)
         ");
         assert_snapshot!(cb.hexdump(), @"0c0000480000fecafecafecaffff1304f8ff60e400007ef8");
@@ -2390,7 +2390,7 @@ mod tests {
         let (mut asm, _) = setup_asm();
         let mut cb = CodeBlock::new_dummy_sized(128 * 1024 * 1024);
 
-        // pla, which is .byte and li, gets the address from how far away it is.
+        // pla, which is .long and li, gets the address from how far away it is.
         // The one for the conditional jump is still padded for bne to know how
         // far to skip.
         let target = cb.get_write_ptr().add_bytes(1 << 26);
@@ -2399,12 +2399,12 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: .byte 0x00, 0x04, 0x10, 0x06
+        0x0: .long 0x06100400
         0x4: li r0, 0
         0x8: mtctr r0
         0xc: bctr
         0x10: bne 0x30
-        0x14: .byte 0xff, 0x03, 0x10, 0x06
+        0x14: .long 0x061003ff
         0x18: li r0, -0x14
         0x1c: nop
         0x20: nop
@@ -2577,7 +2577,7 @@ mod tests {
         let (mut asm, mut cb) = setup_asm();
         let overflow = asm.new_label("overflow");
 
-        // XER is cleared first, since its overflow bit is sticky. (.byte is addo.)
+        // XER is cleared first, since its overflow bit is sticky. (.long is addo.)
         asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
         asm.push_insn(Insn::Jo(overflow.clone()));
         // An immediate goes through r0 after r0 has cleared XER
@@ -2591,13 +2591,13 @@ mod tests {
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: li r0, 0
         0x4: mtxer r0
-        0x8: .byte 0x15, 0x2e, 0x64, 0x7c
+        0x8: .long 0x7c642e15
         0xc: bso 0x30
         0x10: nop
         0x14: li r0, 0
         0x18: mtxer r0
         0x1c: li r0, 1
-        0x20: .byte 0x15, 0x06, 0x64, 0x7c
+        0x20: .long 0x7c640615
         0x24: std r3, 0(r30)
         0x28: bso 0x30
         0x2c: nop
@@ -2612,7 +2612,7 @@ mod tests {
         let overflow = asm.new_label("overflow");
 
         // OV of XER is not sticky, and mcrxrx copies it to LT of CR0.
-        // (.byte is addo, subfo and mulldo.)
+        // (.long is addo, subfo and mulldo.)
         asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
         asm.push_insn(Insn::Jo(overflow.clone()));
         asm.push_insn(Insn::Add { left: Opnd::Reg(R4_REG), right: Opnd::Imm(1), out: Opnd::Reg(R3_REG) });
@@ -2628,25 +2628,25 @@ mod tests {
         asm.compile_with_num_regs(&mut cb, 0);
 
         assert_disasm_snapshot!(cb.disasm(), @"
-        0x0: .byte 0x14, 0x2e, 0x64, 0x7c
+        0x0: .long 0x7c642e14
         0x4: mcrxrx cr0
         0x8: blt 0x58
         0xc: nop
         0x10: li r0, 1
-        0x14: .byte 0x14, 0x06, 0x64, 0x7c
+        0x14: .long 0x7c640614
         0x18: mcrxrx cr0
         0x1c: std r3, 0(r30)
         0x20: blt 0x58
         0x24: nop
-        0x28: .byte 0x50, 0x24, 0x65, 0x7c
+        0x28: .long 0x7c652450
         0x2c: mcrxrx cr0
         0x30: blt 0x58
         0x34: nop
-        0x38: .byte 0xd2, 0x2d, 0x64, 0x7c
+        0x38: .long 0x7c642dd2
         0x3c: mcrxrx cr0
         0x40: blt 0x58
         0x44: nop
-        0x48: .byte 0x14, 0x26, 0x64, 0x7c
+        0x48: .long 0x7c642614
         0x4c: mcrxrx cr0
         0x50: blt 0x58
         0x54: nop
@@ -2659,7 +2659,7 @@ mod tests {
         let (mut asm, mut cb) = setup_asm();
         let overflow = asm.new_label("overflow");
 
-        // (.byte is subfo.)
+        // (.long is subfo.)
         asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
         asm.push_insn(Insn::Jo(overflow.clone()));
         asm.push_insn(Insn::Sub { left: Opnd::Reg(R4_REG), right: Opnd::Imm(1), out: Opnd::Reg(R3_REG) });
@@ -2670,13 +2670,13 @@ mod tests {
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: li r0, 0
         0x4: mtxer r0
-        0x8: .byte 0x51, 0x24, 0x65, 0x7c
+        0x8: .long 0x7c652451
         0xc: bso 0x2c
         0x10: nop
         0x14: li r0, 0
         0x18: mtxer r0
         0x1c: li r0, 1
-        0x20: .byte 0x51, 0x24, 0x60, 0x7c
+        0x20: .long 0x7c602451
         0x24: bso 0x2c
         0x28: nop
         ");
@@ -2689,7 +2689,7 @@ mod tests {
         let overflow = asm.new_label("overflow");
 
         asm.push_insn(Insn::Mul { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
-        // (.byte is mulldo.)
+        // (.long is mulldo.)
         asm.push_insn(Insn::Mul { left: Opnd::Reg(R4_REG), right: Opnd::Reg(R5_REG), out: Opnd::Reg(R3_REG) });
         asm.push_insn(Insn::JoMul(overflow.clone()));
         asm.write_label(overflow);
@@ -2699,7 +2699,7 @@ mod tests {
         0x0: mulld r3, r4, r5
         0x4: li r0, 0
         0x8: mtxer r0
-        0xc: .byte 0xd3, 0x2d, 0x64, 0x7c
+        0xc: .long 0x7c642dd3
         0x10: bso 0x18
         0x14: nop
         ");
@@ -2789,7 +2789,7 @@ mod tests {
         let (mut asm, mut cb) = setup_asm();
         let overflow = asm.new_label("overflow");
 
-        // Shifting left by one bit is adding the value to itself. (.byte is addo.)
+        // Shifting left by one bit is adding the value to itself. (.long is addo.)
         asm.push_insn(Insn::LShift { opnd: Opnd::Reg(R4_REG), shift: Opnd::UImm(1), out: Opnd::Reg(R3_REG) });
         asm.push_insn(Insn::Jo(overflow.clone()));
         asm.write_label(overflow);
@@ -2798,7 +2798,7 @@ mod tests {
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: li r0, 0
         0x4: mtxer r0
-        0x8: .byte 0x15, 0x26, 0x64, 0x7c
+        0x8: .long 0x7c642615
         0xc: bso 0x14
         0x10: nop
         ");
@@ -3207,7 +3207,7 @@ mod tests {
     fn test_ccall_jit_code_in_large_region_isa_3_1() {
         TEST_POWER_ISA.set(PowerIsa::V3_1);
 
-        // pla, which is .byte and li, takes up the same room no matter the address
+        // pla, which is .long and li, takes up the same room no matter the address
         let compile = |target_offset: usize| {
             let (mut asm, _) = setup_asm();
             let mut cb = CodeBlock::new_dummy_sized(128 * 1024 * 1024);
@@ -3223,7 +3223,7 @@ mod tests {
         assert_disasm_snapshot!(far.disasm(), @"
         0x0: ld r0, 0(r1)
         0x4: stdu r0, -0x50(r1)
-        0x8: .byte 0xff, 0x03, 0x10, 0x06
+        0x8: .long 0x061003ff
         0xc: li r12, -8
         0x10: mtctr r12
         0x14: bctrl
@@ -3299,7 +3299,7 @@ mod tests {
 
         assert_disasm_snapshot!(cb.disasm(), @"
         0x0: trap
-        0x4: .byte 0x00, 0x00, 0x00, 0x00
+        0x4: .long 0x00000000
         ");
         assert_snapshot!(cb.hexdump(), @"0800e07f00000000");
     }
@@ -3631,7 +3631,7 @@ mod tests {
         let overflow = asm.new_label("overflow");
 
         // The sum is stored to its stack slot between the addition and the jump.
-        // (.byte is addo.)
+        // (.long is addo.)
         let v0 = asm.load(Opnd::mem(64, SP, 0));
         let v1 = asm.load(Opnd::mem(64, SP, 8));
         let sum = asm.add(v0, v1);
@@ -3648,7 +3648,7 @@ mod tests {
         0xc: ld r11, -8(r31)
         0x10: li r0, 0
         0x14: mtxer r0
-        0x18: .byte 0x15, 0x1e, 0x6b, 0x7c
+        0x18: .long 0x7c6b1e15
         0x1c: bso 0x30
         0x20: nop
         0x24: ld r0, -8(r31)

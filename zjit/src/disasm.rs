@@ -72,6 +72,13 @@ pub fn disasm_addr_range(cb: &CodeBlock, start_addr: usize, end_addr: usize) -> 
                 writeln!(&mut out, "  {bold_begin}# {comment}{bold_end}").unwrap();
             }
         }
+        // Capstone prints a word it cannot decode as bytes in memory order. Print the
+        // word itself, which reads the same in both byte orders.
+        #[cfg(target_arch = "powerpc64")]
+        if let (Some(".byte"), Ok(word)) = (insn.mnemonic(), <[u8; 4]>::try_from(insn.bytes())) {
+            writeln!(&mut out, "  0x{:x}: .long 0x{:08x}", insn.address(), u32::from_ne_bytes(word)).unwrap();
+            continue;
+        }
         writeln!(&mut out, "  {}", format!("{insn}").trim()).unwrap();
     }
 
