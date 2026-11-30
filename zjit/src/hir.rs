@@ -8700,6 +8700,10 @@ impl Function {
             | Insn::FixnumRShift { left, right, .. } => {
                 self.assert_subtype(insn_id, left, types::Fixnum)?;
                 self.assert_subtype(insn_id, right, types::Fixnum)?;
+                // infer_types leaves an unreachable block's instructions Empty.
+                if self.type_of(right).is_subtype(types::Empty) {
+                    return Ok(());
+                }
                 let Some(obj) = self.type_of(right).fixnum_value() else {
                     return Err(ValidationError::MismatchedOperandType(insn_id, right, "<a compile-time constant>".into(), "<unknown>".into()));
                 };
@@ -12284,6 +12288,33 @@ mod validation_tests {
             let last = *function.blocks[entry].insns.last().unwrap();
             assert!(matches!(function.find_ref(last), Insn::Unreachable),
                 "expected entry terminator to fold to Unreachable");
+        });
+    }
+
+    // A shift left behind in a block that `infer_types` no longer reaches has an
+    // `Empty` shift amount until `fold_constants` and `clean_cfg` remove the block.
+    #[test]
+    fn shift_in_unreachable_block_validates() {
+        let mut function = Function::new(std::ptr::null());
+        let entry = function.entry_block;
+        let if_true = function.new_block(0);
+        let if_false = function.new_block(0);
+        let val = function.push_insn(entry, Insn::Const { val: Const::Value(VALUE::fixnum_from_usize(8)) });
+        function.push_insn(entry, Insn::CondBranchHasType(Box::new(CondBranchHasTypeData {
+            val,
+            expected: types::Fixnum,
+            if_true: BranchEdge { target: if_true, args: vec![] },
+            if_false: BranchEdge { target: if_false, args: vec![] },
+        })));
+        function.push_insn(if_true, Insn::Return { val });
+        let amount = function.push_insn(if_false, Insn::Const { val: Const::Value(VALUE::fixnum_from_usize(1)) });
+        let shifted = function.push_insn(if_false, Insn::FixnumRShift { left: val, right: amount });
+        function.push_insn(if_false, Insn::Return { val: shifted });
+        function.seal_entries();
+        crate::cruby::with_rubyvm(|| {
+            function.infer_types();
+            assert!(function.type_of(amount).bit_equal(types::Empty), "if_false should be unreachable");
+            assert!(function.validate().is_ok());
         });
     }
 
