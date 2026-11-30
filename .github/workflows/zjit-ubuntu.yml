@@ -55,8 +55,8 @@ jobs:
       - run: cargo clippy --all-targets --all-features
         working-directory: zjit
 
-  check-ppc64le:
-    name: cargo check (ppc64le)
+  check-ppc64:
+    name: cargo check (ppc64)
 
     runs-on: ubuntu-22.04
 
@@ -73,10 +73,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - run: rustup target add powerpc64le-unknown-linux-gnu
+      - run: rustup target add powerpc64le-unknown-linux-gnu powerpc64-unknown-linux-gnu
 
-      # There is no ppc64le runner to run the tests on. Make sure the backend compiles.
+      # There is no ppc64 runner to run the tests on. Make sure the backend compiles.
       - run: cargo check --all-targets --target powerpc64le-unknown-linux-gnu
+        working-directory: zjit
+
+      - run: cargo check --all-targets --target powerpc64-unknown-linux-gnu
         working-directory: zjit
 
   doc-test:
