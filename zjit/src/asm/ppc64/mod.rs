@@ -670,6 +670,23 @@ pub fn trap(cb: &mut CodeBlock) {
 }
 
 #[cfg(test)]
+impl CodeBlock {
+    /// Like hexdump(), but with every 4-byte word shown in little-endian byte order,
+    /// so that the same snapshot matches on a big-endian host.
+    pub fn hexdump_le(&self) -> String {
+        let hex = self.hexdump();
+        if cfg!(target_endian = "little") {
+            return hex;
+        }
+        hex.as_bytes().chunks(8)
+            .flat_map(|word| word.chunks(2).rev())
+            .flatten()
+            .map(|&digit| digit as char)
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use insta::assert_snapshot;
@@ -685,14 +702,14 @@ mod tests {
     fn test_addi() {
         let cb = compile(|cb| addi(cb, R3, R4, PPC64Opnd::new_imm(-8)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: addi r3, r4, -8");
-        assert_snapshot!(cb.hexdump(), @"f8ff6438");
+        assert_snapshot!(cb.hexdump_le(), @"f8ff6438");
     }
 
     #[test]
     fn test_addi_uimm() {
         let cb = compile(|cb| addi(cb, R1, R1, PPC64Opnd::new_uimm(0x7fff)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: addi r1, r1, 0x7fff");
-        assert_snapshot!(cb.hexdump(), @"ff7f2138");
+        assert_snapshot!(cb.hexdump_le(), @"ff7f2138");
     }
 
     #[test]
@@ -711,28 +728,28 @@ mod tests {
     fn test_addis() {
         let cb = compile(|cb| addis(cb, R3, R4, PPC64Opnd::new_imm(0x1234)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: addis r3, r4, 0x1234");
-        assert_snapshot!(cb.hexdump(), @"3412643c");
+        assert_snapshot!(cb.hexdump_le(), @"3412643c");
     }
 
     #[test]
     fn test_li() {
         let cb = compile(|cb| li(cb, R0, PPC64Opnd::new_imm(-1)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: li r0, -1");
-        assert_snapshot!(cb.hexdump(), @"ffff0038");
+        assert_snapshot!(cb.hexdump_le(), @"ffff0038");
     }
 
     #[test]
     fn test_lis() {
         let cb = compile(|cb| lis(cb, R12, PPC64Opnd::new_imm(-32768)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lis r12, -0x8000");
-        assert_snapshot!(cb.hexdump(), @"0080803d");
+        assert_snapshot!(cb.hexdump_le(), @"0080803d");
     }
 
     #[test]
     fn test_ori() {
         let cb = compile(|cb| ori(cb, R3, R4, PPC64Opnd::new_uimm(0xffff)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: ori r3, r4, 0xffff");
-        assert_snapshot!(cb.hexdump(), @"ffff8360");
+        assert_snapshot!(cb.hexdump_le(), @"ffff8360");
     }
 
     #[test]
@@ -745,56 +762,56 @@ mod tests {
     fn test_oris() {
         let cb = compile(|cb| oris(cb, R12, R11, PPC64Opnd::new_uimm(0x1234)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: oris r12, r11, 0x1234");
-        assert_snapshot!(cb.hexdump(), @"34126c65");
+        assert_snapshot!(cb.hexdump_le(), @"34126c65");
     }
 
     #[test]
     fn test_andi_dot() {
         let cb = compile(|cb| andi_dot(cb, R3, R4, PPC64Opnd::new_uimm(0xff)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: andi. r3, r4, 0xff");
-        assert_snapshot!(cb.hexdump(), @"ff008370");
+        assert_snapshot!(cb.hexdump_le(), @"ff008370");
     }
 
     #[test]
     fn test_xori() {
         let cb = compile(|cb| xori(cb, R3, R4, PPC64Opnd::new_uimm(1)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: xori r3, r4, 1");
-        assert_snapshot!(cb.hexdump(), @"01008368");
+        assert_snapshot!(cb.hexdump_le(), @"01008368");
     }
 
     #[test]
     fn test_nop() {
         let cb = compile(nop);
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: nop");
-        assert_snapshot!(cb.hexdump(), @"00000060");
+        assert_snapshot!(cb.hexdump_le(), @"00000060");
     }
 
     #[test]
     fn test_lbz() {
         let cb = compile(|cb| lbz(cb, R3, PPC64Opnd::new_mem(8, R4, 8)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lbz r3, 8(r4)");
-        assert_snapshot!(cb.hexdump(), @"08006488");
+        assert_snapshot!(cb.hexdump_le(), @"08006488");
     }
 
     #[test]
     fn test_lhz() {
         let cb = compile(|cb| lhz(cb, R3, PPC64Opnd::new_mem(16, R4, -2)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhz r3, -2(r4)");
-        assert_snapshot!(cb.hexdump(), @"feff64a0");
+        assert_snapshot!(cb.hexdump_le(), @"feff64a0");
     }
 
     #[test]
     fn test_lha() {
         let cb = compile(|cb| lha(cb, R3, PPC64Opnd::new_mem(16, R4, 2)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lha r3, 2(r4)");
-        assert_snapshot!(cb.hexdump(), @"020064a8");
+        assert_snapshot!(cb.hexdump_le(), @"020064a8");
     }
 
     #[test]
     fn test_lwz() {
         let cb = compile(|cb| lwz(cb, R3, PPC64Opnd::new_mem(32, R1, 0x7ffc)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwz r3, 0x7ffc(r1)");
-        assert_snapshot!(cb.hexdump(), @"fc7f6180");
+        assert_snapshot!(cb.hexdump_le(), @"fc7f6180");
     }
 
     #[test]
@@ -813,49 +830,49 @@ mod tests {
     fn test_stb() {
         let cb = compile(|cb| stb(cb, R3, PPC64Opnd::new_mem(8, R4, 1)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stb r3, 1(r4)");
-        assert_snapshot!(cb.hexdump(), @"01006498");
+        assert_snapshot!(cb.hexdump_le(), @"01006498");
     }
 
     #[test]
     fn test_sth() {
         let cb = compile(|cb| sth(cb, R5, PPC64Opnd::new_mem(16, R31, -32768)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sth r5, -0x8000(r31)");
-        assert_snapshot!(cb.hexdump(), @"0080bfb0");
+        assert_snapshot!(cb.hexdump_le(), @"0080bfb0");
     }
 
     #[test]
     fn test_stw() {
         let cb = compile(|cb| stw(cb, R0, PPC64Opnd::new_mem(32, R1, 8)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stw r0, 8(r1)");
-        assert_snapshot!(cb.hexdump(), @"08000190");
+        assert_snapshot!(cb.hexdump_le(), @"08000190");
     }
 
     #[test]
     fn test_cmpdi() {
         let cb = compile(|cb| cmpdi(cb, R3, PPC64Opnd::new_imm(-1)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpdi r3, -1");
-        assert_snapshot!(cb.hexdump(), @"ffff232c");
+        assert_snapshot!(cb.hexdump_le(), @"ffff232c");
     }
 
     #[test]
     fn test_cmpwi() {
         let cb = compile(|cb| cmpwi(cb, R3, PPC64Opnd::new_imm(100)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpwi r3, 0x64");
-        assert_snapshot!(cb.hexdump(), @"6400032c");
+        assert_snapshot!(cb.hexdump_le(), @"6400032c");
     }
 
     #[test]
     fn test_cmpldi() {
         let cb = compile(|cb| cmpldi(cb, R3, PPC64Opnd::new_uimm(0xffff)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpldi r3, 0xffff");
-        assert_snapshot!(cb.hexdump(), @"ffff2328");
+        assert_snapshot!(cb.hexdump_le(), @"ffff2328");
     }
 
     #[test]
     fn test_cmplwi() {
         let cb = compile(|cb| cmplwi(cb, R4, PPC64Opnd::new_uimm(0)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmplwi r4, 0");
-        assert_snapshot!(cb.hexdump(), @"00000428");
+        assert_snapshot!(cb.hexdump_le(), @"00000428");
     }
 
     #[test]
@@ -868,14 +885,14 @@ mod tests {
     fn test_ld() {
         let cb = compile(|cb| ld(cb, R3, PPC64Opnd::new_mem(64, R4, 8)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: ld r3, 8(r4)");
-        assert_snapshot!(cb.hexdump(), @"080064e8");
+        assert_snapshot!(cb.hexdump_le(), @"080064e8");
     }
 
     #[test]
     fn test_ld_negative_disp() {
         let cb = compile(|cb| ld(cb, R3, PPC64Opnd::new_mem(64, R1, -8)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: ld r3, -8(r1)");
-        assert_snapshot!(cb.hexdump(), @"f8ff61e8");
+        assert_snapshot!(cb.hexdump_le(), @"f8ff61e8");
     }
 
     #[test]
@@ -888,56 +905,56 @@ mod tests {
     fn test_lwa() {
         let cb = compile(|cb| lwa(cb, R3, PPC64Opnd::new_mem(32, R4, 4)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwa r3, 4(r4)");
-        assert_snapshot!(cb.hexdump(), @"060064e8");
+        assert_snapshot!(cb.hexdump_le(), @"060064e8");
     }
 
     #[test]
     fn test_std() {
         let cb = compile(|cb| std(cb, R0, PPC64Opnd::new_mem(64, R1, 16)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: std r0, 0x10(r1)");
-        assert_snapshot!(cb.hexdump(), @"100001f8");
+        assert_snapshot!(cb.hexdump_le(), @"100001f8");
     }
 
     #[test]
     fn test_stdu() {
         let cb = compile(|cb| stdu(cb, R1, PPC64Opnd::new_mem(64, R1, -112)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stdu r1, -0x70(r1)");
-        assert_snapshot!(cb.hexdump(), @"91ff21f8");
+        assert_snapshot!(cb.hexdump_le(), @"91ff21f8");
     }
 
     #[test]
     fn test_add() {
         let cb = compile(|cb| add(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: add r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"142a647c");
+        assert_snapshot!(cb.hexdump_le(), @"142a647c");
     }
 
     #[test]
     fn test_subf() {
         let cb = compile(|cb| subf(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: subf r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"5028647c");
+        assert_snapshot!(cb.hexdump_le(), @"5028647c");
     }
 
     #[test]
     fn test_neg() {
         let cb = compile(|cb| neg(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: neg r3, r4");
-        assert_snapshot!(cb.hexdump(), @"d000647c");
+        assert_snapshot!(cb.hexdump_le(), @"d000647c");
     }
 
     #[test]
     fn test_mulld() {
         let cb = compile(|cb| mulld(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mulld r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"d229647c");
+        assert_snapshot!(cb.hexdump_le(), @"d229647c");
     }
 
     #[test]
     fn test_mulhd() {
         let cb = compile(|cb| mulhd(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mulhd r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"9228647c");
+        assert_snapshot!(cb.hexdump_le(), @"9228647c");
     }
 
     #[test]
@@ -945,7 +962,7 @@ mod tests {
         let cb = compile(|cb| addo(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642e14");
-        assert_snapshot!(cb.hexdump(), @"142e647c");
+        assert_snapshot!(cb.hexdump_le(), @"142e647c");
     }
 
     #[test]
@@ -953,7 +970,7 @@ mod tests {
         let cb = compile(|cb| subfo(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642c50");
-        assert_snapshot!(cb.hexdump(), @"502c647c");
+        assert_snapshot!(cb.hexdump_le(), @"502c647c");
     }
 
     #[test]
@@ -961,7 +978,7 @@ mod tests {
         let cb = compile(|cb| mulldo(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642dd2");
-        assert_snapshot!(cb.hexdump(), @"d22d647c");
+        assert_snapshot!(cb.hexdump_le(), @"d22d647c");
     }
 
     #[test]
@@ -969,7 +986,7 @@ mod tests {
         let cb = compile(|cb| addo_dot(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642e15");
-        assert_snapshot!(cb.hexdump(), @"152e647c");
+        assert_snapshot!(cb.hexdump_le(), @"152e647c");
     }
 
     #[test]
@@ -977,7 +994,7 @@ mod tests {
         let cb = compile(|cb| subfo_dot(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642c51");
-        assert_snapshot!(cb.hexdump(), @"512c647c");
+        assert_snapshot!(cb.hexdump_le(), @"512c647c");
     }
 
     #[test]
@@ -985,175 +1002,175 @@ mod tests {
         let cb = compile(|cb| mulldo_dot(cb, R3, R4, R5));
         // Capstone doesn't decode the overflow-recording forms
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: .long 0x7c642dd3");
-        assert_snapshot!(cb.hexdump(), @"d32d647c");
+        assert_snapshot!(cb.hexdump_le(), @"d32d647c");
     }
 
     #[test]
     fn test_and() {
         let cb = compile(|cb| and(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: and r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"3828837c");
+        assert_snapshot!(cb.hexdump_le(), @"3828837c");
     }
 
     #[test]
     fn test_and_dot() {
         let cb = compile(|cb| and_dot(cb, R0, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: and. r0, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"3928807c");
+        assert_snapshot!(cb.hexdump_le(), @"3928807c");
     }
 
     #[test]
     fn test_or() {
         let cb = compile(|cb| or(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: or r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"782b837c");
+        assert_snapshot!(cb.hexdump_le(), @"782b837c");
     }
 
     #[test]
     fn test_mr() {
         let cb = compile(|cb| mr(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mr r3, r4");
-        assert_snapshot!(cb.hexdump(), @"7823837c");
+        assert_snapshot!(cb.hexdump_le(), @"7823837c");
     }
 
     #[test]
     fn test_xor() {
         let cb = compile(|cb| xor(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: xor r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"782a837c");
+        assert_snapshot!(cb.hexdump_le(), @"782a837c");
     }
 
     #[test]
     fn test_nor() {
         let cb = compile(|cb| nor(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: nor r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"f828837c");
+        assert_snapshot!(cb.hexdump_le(), @"f828837c");
     }
 
     #[test]
     fn test_not() {
         let cb = compile(|cb| not(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: nor r3, r4, r4");
-        assert_snapshot!(cb.hexdump(), @"f820837c");
+        assert_snapshot!(cb.hexdump_le(), @"f820837c");
     }
 
     #[test]
     fn test_cmpd() {
         let cb = compile(|cb| cmpd(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpd r3, r4");
-        assert_snapshot!(cb.hexdump(), @"0020237c");
+        assert_snapshot!(cb.hexdump_le(), @"0020237c");
     }
 
     #[test]
     fn test_cmpw() {
         let cb = compile(|cb| cmpw(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpw r3, r4");
-        assert_snapshot!(cb.hexdump(), @"0020037c");
+        assert_snapshot!(cb.hexdump_le(), @"0020037c");
     }
 
     #[test]
     fn test_cmpld() {
         let cb = compile(|cb| cmpld(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmpld r3, r4");
-        assert_snapshot!(cb.hexdump(), @"4020237c");
+        assert_snapshot!(cb.hexdump_le(), @"4020237c");
     }
 
     #[test]
     fn test_cmplw() {
         let cb = compile(|cb| cmplw(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: cmplw r3, r4");
-        assert_snapshot!(cb.hexdump(), @"4020037c");
+        assert_snapshot!(cb.hexdump_le(), @"4020037c");
     }
 
     #[test]
     fn test_ldx() {
         let cb = compile(|cb| ldx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: ldx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2a28647c");
+        assert_snapshot!(cb.hexdump_le(), @"2a28647c");
     }
 
     #[test]
     fn test_lbzx() {
         let cb = compile(|cb| lbzx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lbzx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"ae28647c");
+        assert_snapshot!(cb.hexdump_le(), @"ae28647c");
     }
 
     #[test]
     fn test_lhzx() {
         let cb = compile(|cb| lhzx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhzx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2e2a647c");
+        assert_snapshot!(cb.hexdump_le(), @"2e2a647c");
     }
 
     #[test]
     fn test_lhax() {
         let cb = compile(|cb| lhax(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhax r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"ae2a647c");
+        assert_snapshot!(cb.hexdump_le(), @"ae2a647c");
     }
 
     #[test]
     fn test_lwzx() {
         let cb = compile(|cb| lwzx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwzx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2e28647c");
+        assert_snapshot!(cb.hexdump_le(), @"2e28647c");
     }
 
     #[test]
     fn test_lwax() {
         let cb = compile(|cb| lwax(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwax r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"aa2a647c");
+        assert_snapshot!(cb.hexdump_le(), @"aa2a647c");
     }
 
     #[test]
     fn test_stdx() {
         let cb = compile(|cb| stdx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stdx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2a29647c");
+        assert_snapshot!(cb.hexdump_le(), @"2a29647c");
     }
 
     #[test]
     fn test_stbx() {
         let cb = compile(|cb| stbx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stbx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"ae29647c");
+        assert_snapshot!(cb.hexdump_le(), @"ae29647c");
     }
 
     #[test]
     fn test_sthx() {
         let cb = compile(|cb| sthx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sthx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2e2b647c");
+        assert_snapshot!(cb.hexdump_le(), @"2e2b647c");
     }
 
     #[test]
     fn test_stwx() {
         let cb = compile(|cb| stwx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stwx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2e29647c");
+        assert_snapshot!(cb.hexdump_le(), @"2e29647c");
     }
 
     #[test]
     fn test_ldbrx() {
         let cb = compile(|cb| ldbrx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: ldbrx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"282c647c");
+        assert_snapshot!(cb.hexdump_le(), @"282c647c");
     }
 
     #[test]
     fn test_lwbrx() {
         let cb = compile(|cb| lwbrx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lwbrx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2c2c647c");
+        assert_snapshot!(cb.hexdump_le(), @"2c2c647c");
     }
 
     #[test]
     fn test_lhbrx() {
         let cb = compile(|cb| lhbrx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: lhbrx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"2c2e647c");
+        assert_snapshot!(cb.hexdump_le(), @"2c2e647c");
     }
 
     #[test]
@@ -1166,77 +1183,77 @@ mod tests {
     fn test_sld() {
         let cb = compile(|cb| sld(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sld r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"3628837c");
+        assert_snapshot!(cb.hexdump_le(), @"3628837c");
     }
 
     #[test]
     fn test_srd() {
         let cb = compile(|cb| srd(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: srd r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"362c837c");
+        assert_snapshot!(cb.hexdump_le(), @"362c837c");
     }
 
     #[test]
     fn test_srad() {
         let cb = compile(|cb| srad(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: srad r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"342e837c");
+        assert_snapshot!(cb.hexdump_le(), @"342e837c");
     }
 
     #[test]
     fn test_sradi() {
         let cb = compile(|cb| sradi(cb, R3, R4, PPC64Opnd::new_uimm(1)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sradi r3, r4, 1");
-        assert_snapshot!(cb.hexdump(), @"740e837c");
+        assert_snapshot!(cb.hexdump_le(), @"740e837c");
     }
 
     #[test]
     fn test_sradi_63() {
         let cb = compile(|cb| sradi(cb, R3, R4, PPC64Opnd::new_uimm(63)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sradi r3, r4, 0x3f");
-        assert_snapshot!(cb.hexdump(), @"76fe837c");
+        assert_snapshot!(cb.hexdump_le(), @"76fe837c");
     }
 
     #[test]
     fn test_rldicl() {
         let cb = compile(|cb| rldicl(cb, R3, R4, PPC64Opnd::new_uimm(0), PPC64Opnd::new_uimm(32)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: clrldi r3, r4, 0x20");
-        assert_snapshot!(cb.hexdump(), @"20008378");
+        assert_snapshot!(cb.hexdump_le(), @"20008378");
     }
 
     #[test]
     fn test_rldicr() {
         let cb = compile(|cb| rldicr(cb, R3, R4, PPC64Opnd::new_uimm(32), PPC64Opnd::new_uimm(31)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sldi r3, r4, 0x20");
-        assert_snapshot!(cb.hexdump(), @"c6078378");
+        assert_snapshot!(cb.hexdump_le(), @"c6078378");
     }
 
     #[test]
     fn test_sldi() {
         let cb = compile(|cb| sldi(cb, R3, R4, PPC64Opnd::new_uimm(1)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sldi r3, r4, 1");
-        assert_snapshot!(cb.hexdump(), @"a40f8378");
+        assert_snapshot!(cb.hexdump_le(), @"a40f8378");
     }
 
     #[test]
     fn test_sldi_63() {
         let cb = compile(|cb| sldi(cb, R3, R4, PPC64Opnd::new_uimm(63)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: sldi r3, r4, 0x3f");
-        assert_snapshot!(cb.hexdump(), @"06f88378");
+        assert_snapshot!(cb.hexdump_le(), @"06f88378");
     }
 
     #[test]
     fn test_srdi() {
         let cb = compile(|cb| srdi(cb, R3, R4, PPC64Opnd::new_uimm(1)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: rldicl r3, r4, 0x3f, 1");
-        assert_snapshot!(cb.hexdump(), @"42f88378");
+        assert_snapshot!(cb.hexdump_le(), @"42f88378");
     }
 
     #[test]
     fn test_srdi_63() {
         let cb = compile(|cb| srdi(cb, R3, R4, PPC64Opnd::new_uimm(63)));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: rldicl r3, r4, 1, 0x3f");
-        assert_snapshot!(cb.hexdump(), @"e00f8378");
+        assert_snapshot!(cb.hexdump_le(), @"e00f8378");
     }
 
     #[test]
@@ -1249,21 +1266,21 @@ mod tests {
     fn test_extsb() {
         let cb = compile(|cb| extsb(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: extsb r3, r4");
-        assert_snapshot!(cb.hexdump(), @"7407837c");
+        assert_snapshot!(cb.hexdump_le(), @"7407837c");
     }
 
     #[test]
     fn test_extsh() {
         let cb = compile(|cb| extsh(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: extsh r3, r4");
-        assert_snapshot!(cb.hexdump(), @"3407837c");
+        assert_snapshot!(cb.hexdump_le(), @"3407837c");
     }
 
     #[test]
     fn test_extsw() {
         let cb = compile(|cb| extsw(cb, R3, R4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: extsw r3, r4");
-        assert_snapshot!(cb.hexdump(), @"b407837c");
+        assert_snapshot!(cb.hexdump_le(), @"b407837c");
     }
 
     #[test]
@@ -1288,98 +1305,98 @@ mod tests {
     fn test_b() {
         let cb = compile(|cb| b(cb, 256));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: b 0x100");
-        assert_snapshot!(cb.hexdump(), @"00010048");
+        assert_snapshot!(cb.hexdump_le(), @"00010048");
     }
 
     #[test]
     fn test_b_backward() {
         let cb = compile(|cb| b(cb, -4));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: b 0xfffffffffffffffc");
-        assert_snapshot!(cb.hexdump(), @"fcffff4b");
+        assert_snapshot!(cb.hexdump_le(), @"fcffff4b");
     }
 
     #[test]
     fn test_bl() {
         let cb = compile(|cb| bl(cb, 8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bl 8");
-        assert_snapshot!(cb.hexdump(), @"09000048");
+        assert_snapshot!(cb.hexdump_le(), @"09000048");
     }
 
     #[test]
     fn test_bc_eq() {
         let cb = compile(|cb| bc(cb, Condition::EQ, 8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: beq 8");
-        assert_snapshot!(cb.hexdump(), @"08008241");
+        assert_snapshot!(cb.hexdump_le(), @"08008241");
     }
 
     #[test]
     fn test_bc_ne_backward() {
         let cb = compile(|cb| bc(cb, Condition::NE, -8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bne 0xfffffffffffffff8");
-        assert_snapshot!(cb.hexdump(), @"f8ff8240");
+        assert_snapshot!(cb.hexdump_le(), @"f8ff8240");
     }
 
     #[test]
     fn test_bc_lt() {
         let cb = compile(|cb| bc(cb, Condition::LT, 32764));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: blt 0x7ffc");
-        assert_snapshot!(cb.hexdump(), @"fc7f8041");
+        assert_snapshot!(cb.hexdump_le(), @"fc7f8041");
     }
 
     #[test]
     fn test_bc_ge() {
         let cb = compile(|cb| bc(cb, Condition::GE, -32768));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bge 0xffffffffffff8000");
-        assert_snapshot!(cb.hexdump(), @"00808040");
+        assert_snapshot!(cb.hexdump_le(), @"00808040");
     }
 
     #[test]
     fn test_bc_gt() {
         let cb = compile(|cb| bc(cb, Condition::GT, 8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bgt 8");
-        assert_snapshot!(cb.hexdump(), @"08008141");
+        assert_snapshot!(cb.hexdump_le(), @"08008141");
     }
 
     #[test]
     fn test_bc_le() {
         let cb = compile(|cb| bc(cb, Condition::LE, 8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: ble 8");
-        assert_snapshot!(cb.hexdump(), @"08008140");
+        assert_snapshot!(cb.hexdump_le(), @"08008140");
     }
 
     #[test]
     fn test_bc_so() {
         let cb = compile(|cb| bc(cb, Condition::SO, 8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bso 8");
-        assert_snapshot!(cb.hexdump(), @"08008341");
+        assert_snapshot!(cb.hexdump_le(), @"08008341");
     }
 
     #[test]
     fn test_bc_ns() {
         let cb = compile(|cb| bc(cb, Condition::NS, 8));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bns 8");
-        assert_snapshot!(cb.hexdump(), @"08008340");
+        assert_snapshot!(cb.hexdump_le(), @"08008340");
     }
 
     #[test]
     fn test_blr() {
         let cb = compile(blr);
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: blr");
-        assert_snapshot!(cb.hexdump(), @"2000804e");
+        assert_snapshot!(cb.hexdump_le(), @"2000804e");
     }
 
     #[test]
     fn test_bctr() {
         let cb = compile(bctr);
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bctr");
-        assert_snapshot!(cb.hexdump(), @"2004804e");
+        assert_snapshot!(cb.hexdump_le(), @"2004804e");
     }
 
     #[test]
     fn test_bctrl() {
         let cb = compile(bctrl);
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: bctrl");
-        assert_snapshot!(cb.hexdump(), @"2104804e");
+        assert_snapshot!(cb.hexdump_le(), @"2104804e");
     }
 
     #[test]
@@ -1398,35 +1415,35 @@ mod tests {
     fn test_mflr() {
         let cb = compile(|cb| mflr(cb, R0));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mflr r0");
-        assert_snapshot!(cb.hexdump(), @"a602087c");
+        assert_snapshot!(cb.hexdump_le(), @"a602087c");
     }
 
     #[test]
     fn test_mtlr() {
         let cb = compile(|cb| mtlr(cb, R0));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtlr r0");
-        assert_snapshot!(cb.hexdump(), @"a603087c");
+        assert_snapshot!(cb.hexdump_le(), @"a603087c");
     }
 
     #[test]
     fn test_mtctr() {
         let cb = compile(|cb| mtctr(cb, R12));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtctr r12");
-        assert_snapshot!(cb.hexdump(), @"a603897d");
+        assert_snapshot!(cb.hexdump_le(), @"a603897d");
     }
 
     #[test]
     fn test_mtxer() {
         let cb = compile(|cb| mtxer(cb, R0));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mtxer r0");
-        assert_snapshot!(cb.hexdump(), @"a603017c");
+        assert_snapshot!(cb.hexdump_le(), @"a603017c");
     }
 
     #[test]
     fn test_mcrxrx() {
         let cb = compile(mcrxrx);
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: mcrxrx cr0");
-        assert_snapshot!(cb.hexdump(), @"8004007c");
+        assert_snapshot!(cb.hexdump_le(), @"8004007c");
     }
 
     #[test]
@@ -1461,7 +1478,7 @@ mod tests {
         0x0: .long 0x060106a2
         0x4: li r3, 0x340
         ");
-        assert_snapshot!(cb.hexdump(), @"a206010640036038");
+        assert_snapshot!(cb.hexdump_le(), @"a206010640036038");
     }
 
     #[test]
@@ -1472,7 +1489,7 @@ mod tests {
         0x0: .long 0x0613fffd
         0x4: li r12, -0x3456
         ");
-        assert_snapshot!(cb.hexdump(), @"fdff1306aacb8039");
+        assert_snapshot!(cb.hexdump_le(), @"fdff1306aacb8039");
     }
 
     #[test]
@@ -1483,42 +1500,42 @@ mod tests {
         0x0: .long 0x04100001
         0x4: .long 0xe4a02345
         ");
-        assert_snapshot!(cb.hexdump(), @"010010044523a0e4");
+        assert_snapshot!(cb.hexdump_le(), @"010010044523a0e4");
     }
 
     #[test]
     fn test_isel_eq() {
         let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::EQ));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r4, r5, cr0eq");
-        assert_snapshot!(cb.hexdump(), @"9e28647c");
+        assert_snapshot!(cb.hexdump_le(), @"9e28647c");
     }
 
     #[test]
     fn test_isel_ne() {
         let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::NE));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r5, r4, cr0eq");
-        assert_snapshot!(cb.hexdump(), @"9e20657c");
+        assert_snapshot!(cb.hexdump_le(), @"9e20657c");
     }
 
     #[test]
     fn test_isel_lt() {
         let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::LT));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r4, r5, cr0lt");
-        assert_snapshot!(cb.hexdump(), @"1e28647c");
+        assert_snapshot!(cb.hexdump_le(), @"1e28647c");
     }
 
     #[test]
     fn test_isel_le() {
         let cb = compile(|cb| isel(cb, R3, R4, R5, Condition::LE));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r5, r4, cr0gt");
-        assert_snapshot!(cb.hexdump(), @"5e20657c");
+        assert_snapshot!(cb.hexdump_le(), @"5e20657c");
     }
 
     #[test]
     fn test_isel_r0_falsy() {
         let cb = compile(|cb| isel(cb, R3, R4, R0, Condition::EQ));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: isel r3, r4, r0, cr0eq");
-        assert_snapshot!(cb.hexdump(), @"9e00647c");
+        assert_snapshot!(cb.hexdump_le(), @"9e00647c");
     }
 
     #[test]
@@ -1537,20 +1554,20 @@ mod tests {
     fn test_ldarx() {
         let cb = compile(|cb| ldarx(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: ldarx r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"a828647c");
+        assert_snapshot!(cb.hexdump_le(), @"a828647c");
     }
 
     #[test]
     fn test_stdcx_dot() {
         let cb = compile(|cb| stdcx_dot(cb, R3, R4, R5));
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: stdcx. r3, r4, r5");
-        assert_snapshot!(cb.hexdump(), @"ad29647c");
+        assert_snapshot!(cb.hexdump_le(), @"ad29647c");
     }
 
     #[test]
     fn test_trap() {
         let cb = compile(trap);
         assert_disasm_snapshot!(cb.disasm(), @"  0x0: trap");
-        assert_snapshot!(cb.hexdump(), @"0800e07f");
+        assert_snapshot!(cb.hexdump_le(), @"0800e07f");
     }
 }
