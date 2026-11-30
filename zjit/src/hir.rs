@@ -7013,13 +7013,18 @@ impl Function {
 
     fn optimize_load_store(&mut self) {
         for block in self.reverse_post_order() {
-            let mut compile_time_heap: HashMap<(InsnId, i32), InsnId>  = HashMap::new();
+            // Keyed by receiver, offset and width. The width keeps apart fields that start at
+            // the same offset, as RBasic's flags and shape ID do on big-endian.
+            let mut compile_time_heap: HashMap<(InsnId, i32, u8), InsnId>  = HashMap::new();
+            let is_rbasic_flags = |&(_, offset, num_bits): &(InsnId, i32, u8)| {
+                offset == RUBY_OFFSET_RBASIC_FLAGS && num_bits == types::CUInt64.num_bits()
+            };
             let old_insns = std::mem::take(&mut self.blocks[block].insns);
             let mut new_insns = Vec::with_capacity(old_insns.len());
             for insn_id in old_insns {
                 let replacement_insn: InsnId = match self.resolve(insn_id).insn(self) {
-                    &Insn::StoreField { recv, offset, val, .. } => {
-                        let key = (self.chase_insn(recv), offset);
+                    &Insn::StoreField { recv, offset, val, num_bits, .. } => {
+                        let key = (self.chase_insn(recv), offset, num_bits);
                         let heap_entry = compile_time_heap.get(&key).copied();
                         // TODO(Jacob): Switch from actual to partial equality
                         if Some(val) == heap_entry {
@@ -7027,12 +7032,12 @@ impl Function {
                             continue
                         }
                         // TODO(Jacob): Add TBAA to avoid removing so many entries
-                        compile_time_heap.retain(|(_, off), _| *off != offset);
+                        compile_time_heap.retain(|(_, off, _), _| *off != offset);
                         compile_time_heap.insert(key, val);
                         insn_id
                     },
-                    &Insn::LoadField { recv, offset, return_type, .. } => {
-                        let key = (self.chase_insn(recv), offset);
+                    &Insn::LoadField { recv, offset, return_type, num_bits, .. } => {
+                        let key = (self.chase_insn(recv), offset, num_bits);
                         match compile_time_heap.entry(key) {
                             std::collections::hash_map::Entry::Occupied(entry) => {
                                 let cached_insn = *entry.get();
@@ -7066,15 +7071,13 @@ impl Function {
                         // array's flags, but the current effects system lumps flags in with other
                         // memory writes, so we manually exclude the flags from invalidation for
                         // now.
-                        let offset = RUBY_OFFSET_RBASIC_FLAGS;
-                        compile_time_heap.retain(|(_, off), _| *off == offset);
+                        compile_time_heap.retain(|key, _| is_rbasic_flags(key));
                         insn_id
                     }
                     &Insn::WriteBarrier { .. } | &Insn::StringCoderange { .. } => {
                         // Both operations may update object flags. We must invalidate cached flag
                         // bits loads until the effect system can model individual fields.
-                        let offset = RUBY_OFFSET_RBASIC_FLAGS;
-                        compile_time_heap.retain(|(_, off), _| *off != offset);
+                        compile_time_heap.retain(|key, _| !is_rbasic_flags(key));
                         insn_id
                     },
                     insn => {
