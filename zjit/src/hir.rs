@@ -7688,7 +7688,8 @@ impl Function {
     }
 
     /// Clean up linked lists of blocks A -> B -> C into A (with B's and C's instructions).
-    fn clean_cfg(&mut self) {
+    /// Returns true if any block was absorbed, in which case types have been inferred again.
+    fn clean_cfg(&mut self) -> bool {
         // num_in_edges is invariant throughout cleaning the CFG:
         // * we don't allocate new blocks
         // * blocks that get absorbed are not in RPO anymore
@@ -7717,6 +7718,7 @@ impl Function {
         if changed {
             crate::stats::trace_compile_phase("infer_types", || self.infer_types());
         }
+        changed
     }
 
     /// Remove duplicate PatchPoint instructions within each basic block.
@@ -8162,7 +8164,12 @@ impl Function {
             run_pass!(optimize_load_store);
             run_pass!(canonicalize);
             run_pass!(fold_constants);
-            run_pass!(clean_cfg);
+            // Absorbing a block infers types again, which can decide a branch that
+            // fold_constants has already seen. Fold it before the next pass or codegen
+            // sees the block it leads to, which infer_types has left untyped.
+            while run_pass!(clean_cfg) {
+                run_pass!(fold_constants);
+            }
             run_pass!(remove_redundant_patch_points);
             run_pass!(remove_duplicate_check_interrupts);
             if has_ever_inlined {

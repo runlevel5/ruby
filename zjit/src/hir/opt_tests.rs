@@ -1433,6 +1433,52 @@ mod hir_opt_tests {
         ");
     }
 
+    // Both operands of || fold in the same fold_constants run, so the block that tests the
+    // result still has a parameter until clean_cfg absorbs it and infers types again.
+    #[test]
+    fn test_fold_branch_decided_by_clean_cfg() {
+        eval("
+            K = -1
+            def test(a)
+              return a if (1 != 1 || K != -1)
+              a >> 1
+            end
+            test(3)
+            test(3)
+            Object.send(:remove_const, :K)
+            K = 32
+            test(3)
+        ");
+        assert_snapshot!(hir_string("test"), @"
+        fn test@<compiled>:4:
+        bb1():
+          EntryPoint interpreter
+          v1:BasicObject = LoadSelf
+          v2:CPtr = LoadSP
+          v3:BasicObject = LoadField v2, :a@0x1000
+          Jump bb3(v1, v3)
+        bb2():
+          EntryPoint JIT(0)
+          v6:BasicObject = LoadArg :self@0
+          v7:BasicObject = LoadArg :a@1
+          Jump bb3(v6, v7)
+        bb3(v9:BasicObject, v10:BasicObject):
+          v14:Fixnum[1] = Const Value(1)
+          v16:Fixnum[1] = Const Value(1)
+          PatchPoint MethodRedefined(Integer@0x1008, !=@0x1010, cme:0x1018)
+          PushInlineFrame :!=, v14 (0x1040), num_args=1
+          PatchPoint MethodRedefined(Integer@0x1008, ==@0x1060, cme:0x1068)
+          v129:FalseClass = Const Value(false)
+          PatchPoint NoEPEscape(!=)
+          PopInlineFrame
+          PatchPoint StableConstantNames(0x1090, K)
+          v29:Fixnum[32] = Const Value(32)
+          PatchPoint NoEPEscape(test)
+          CheckInterrupts
+          Return v10
+        ");
+    }
+
     #[test]
     fn test_fold_fixnum_neq_true() {
         eval("
